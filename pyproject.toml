@@ -17,6 +17,10 @@ dependencies = [
     "tavily-python>=0.5",
     "python-dotenv>=1.0",
     "beautifulsoup4>=4.12",
+    # Resilience (Phase 5): bounded retries around external LLM/Tavily/Chroma calls
+    "tenacity>=9.0",
+    # Observability (Phase 5/10): agent tracing
+    "langfuse>=3.0",
 ]
 
 [project.optional-dependencies]

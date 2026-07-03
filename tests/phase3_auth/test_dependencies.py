@@ -4,10 +4,18 @@ import pytest
 from fakeredis import aioredis as fakeredis_aioredis
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from auth.dependencies import get_current_user
 from auth.jwt import create_access_token, create_refresh_token
 from db.models import User
+
+
+class _UnavailableRedis:
+    """Simulates a Redis outage: any call raises a connection error."""
+
+    async def exists(self, *args, **kwargs):
+        raise RedisConnectionError("connection refused")
 
 
 class _FakeResult:
@@ -101,3 +109,16 @@ async def test_inactive_user_is_rejected():
     with pytest.raises(HTTPException) as exc_info:
         await get_current_user(_credentials(token), db_session, redis_client)
     assert exc_info.value.status_code == 401
+
+
+async def test_revocation_check_fails_open_when_redis_unavailable(caplog):
+    """A Redis outage during the revocation check must not deny a valid, active user."""
+    user_id = uuid.uuid4()
+    token = create_access_token(str(user_id), "a@b.com", "alice")
+    db_session = _FakeDBSession(_active_user(user_id))
+
+    with caplog.at_level("WARNING"):
+        user = await get_current_user(_credentials(token), db_session, _UnavailableRedis())
+
+    assert user.id == user_id
+    assert "revocation_check_unavailable" in caplog.text

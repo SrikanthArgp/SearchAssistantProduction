@@ -87,7 +87,8 @@ The compiled graph uses `MemorySaver` (in-memory). Queries in `main.py` pass `th
 
 This repo is being turned into a production REST API — JWT auth, per-user sessions, Postgres + Redis persistence, RAGAS/Langfuse evaluation. The plan, current status, and reasoning behind every deviation from it (with the "why") live in two files — **read them before touching `db/`, `auth/`, `cache/`, or adding to the plan**:
 
-- `plan.md` — full target design: new folder structure, schema, API endpoints, phase-by-phase migration order (Phases 1–10)
+- `plan.md` — full target design: new folder structure, schema, API endpoints, phase-by-phase migration order (Phases 1–14)
+  - Phases 1–4 are already **built and tested**; Phases 5–14 (including `config.py`, `/v1` API versioning, global error handling, auth-specific rate limiting, and a Next.js frontend split across Phase 7 (auth) and Phase 8 (chat UI)) are still design-only in `plan.md`, not present in the current code
 - `completed.md` — what's actually done vs. still pending, updated after every phase, including real issues hit along the way (e.g. Windows `ProactorEventLoop` incompatibility with psycopg async, `passlib`/`bcrypt` version conflict) and why each was resolved the way it was
 
 As of this writing: Phases 1–4 (Infrastructure, Database Layer, Auth Layer, Cache Layer) are complete and tested — see `test_reports/` (one report per phase, human-readable, functionality-first) for what's actually verified. `graph.py`/`main.py` are **still unchanged** — the `db/`, `auth/`, `cache/` packages exist and are tested standalone but are not yet wired into the graph or exposed via an API; that starts at Phase 5.

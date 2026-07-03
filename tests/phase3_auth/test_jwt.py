@@ -29,7 +29,17 @@ def test_refresh_token_round_trip_has_expected_claims():
 
 def test_tampered_token_is_rejected():
     token = create_access_token("user-123", "a@b.com", "alice")
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+
+    # Flip a character in the middle of the payload, not the last character of any
+    # base64url segment. The last character of a base64url segment can carry unused
+    # padding bits (256-bit signatures encode to 43 chars, where the last char only
+    # holds 4 real bits) — flipping it sometimes leaves the decoded bytes unchanged,
+    # making this assertion flaky. A middle character always encodes a full 6 bits.
+    mid = len(payload) // 2
+    tampered_char = "A" if payload[mid] != "A" else "B"
+    tampered_payload = payload[:mid] + tampered_char + payload[mid + 1 :]
+    tampered = f"{header}.{tampered_payload}.{signature}"
 
     with pytest.raises(JWTError):
         decode_token(tampered)

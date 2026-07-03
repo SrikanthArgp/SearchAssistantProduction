@@ -1,9 +1,11 @@
+import logging
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from chains.answer_grader import answer_grader
 from chains.hallucination_grader import hallucination_grader
@@ -12,7 +14,26 @@ from consts import GENERATE, GRADE_DOCUMENTS, RETRIEVE, WEBSEARCH
 from nodes import generate, grade_documents, retrieve, web_search
 from state import GraphState
 
-memory = MemorySaver()
+logger = logging.getLogger(__name__)
+
+_RETRY = dict(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=False)
+
+
+@retry(**_RETRY)
+def _route_question(question: str) -> RouteQuery:
+    return question_router.invoke({"question": question})  # type: ignore
+
+
+@retry(**_RETRY)
+def _grade_hallucination(documents, generation):
+    return hallucination_grader.invoke(
+        {"documents": documents, "generation": generation}
+    )
+
+
+@retry(**_RETRY)
+def _grade_answer(question, generation):
+    return answer_grader.invoke({"question": question, "generation": generation})
 
 
 def decide_to_generate(state):
@@ -34,15 +55,25 @@ def grade_generation_grounded_in_documents_and_question(state: GraphState) -> st
     documents = state["documents"]
     generation = state["generation"]
 
-    score = hallucination_grader.invoke(
-        {"documents": documents, "generation": generation}
-    )
+    try:
+        hallucination_grade = _grade_hallucination(documents, generation).binary_score
+    except Exception:
+        logger.warning("hallucination_grading_failed", exc_info=True)
+        # Can't verify groundedness — accept the generation rather than looping
+        # indefinitely between generate/websearch on a degraded grader.
+        print("---HALLUCINATION CHECK UNAVAILABLE, ACCEPTING GENERATION---")
+        return "useful"
 
-    if hallucination_grade := score.binary_score:
+    if hallucination_grade:
         print("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
         print("---GRADE GENERATION vs QUESTION---")
-        score = answer_grader.invoke({"question": question, "generation": generation})
-        if answer_grade := score.binary_score:
+        try:
+            answer_grade = _grade_answer(question, generation).binary_score
+        except Exception:
+            logger.warning("answer_grading_failed", exc_info=True)
+            print("---ANSWER CHECK UNAVAILABLE, ACCEPTING GENERATION---")
+            return "useful"
+        if answer_grade:
             print("---DECISION: GENERATION ADDRESSES QUESTION---")
             return "useful"
         else:
@@ -56,7 +87,13 @@ def grade_generation_grounded_in_documents_and_question(state: GraphState) -> st
 def route_question(state: GraphState) -> str:
     print("---ROUTE QUESTION---")
     question = state["question"]
-    source: RouteQuery = question_router.invoke({"question": question}) # type: ignore
+    try:
+        source = _route_question(question)
+    except Exception:
+        logger.warning("routing_failed", exc_info=True)
+        print("---ROUTING UNAVAILABLE, DEFAULTING TO WEB SEARCH---")
+        return WEBSEARCH
+
     if source.datasource == WEBSEARCH:
         print("---ROUTE QUESTION TO WEB SEARCH---")
         return WEBSEARCH
@@ -101,4 +138,6 @@ workflow.add_conditional_edges(
 )
 
 
-app = workflow.compile(checkpointer=memory)
+def create_app(checkpointer):
+    """Compile and return the CRAG graph with the given checkpointer."""
+    return workflow.compile(checkpointer=checkpointer)
