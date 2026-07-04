@@ -308,6 +308,10 @@ Neither is Phase 7 code — both are in already-shipped Phases 1–6 — but bot
 - **Regression**: `pytest tests/ multi_agent/chains/tests/ -m "not integration"` → 93 passed, 11 failed — all 11 pre-existing (10 `requires_redis` tests, since Docker was down all session; 1 is the long-documented `test_hallucination_grader_answer_no` LLM-judgment flake). No new failures from either fix.
 - No `plan.md` changes — both are bug fixes to already-correct designs (the fail-open behavior and the pgbouncer transaction-pooler choice were both deliberate, documented decisions; only the missing timeout and the missing `prepare_threshold` setting were bugs).
 
+### Decision (2026-07-04) — Added a root `README.md` for human-facing local run/test steps
+User asked for a step-by-step guide to start both halves locally and manually test register/login. Rather than fold this into `CLAUDE.md` (which is scoped to Claude Code sessions — codebase structure/conventions, not a getting-started guide), added a new root `README.md`: prerequisites, start-Redis/start-backend/start-frontend steps, a 7-row manual test table (unauthenticated redirect, register, reload-persistence, logout, re-login, wrong password, duplicate registration) with expected results per row, the `npm run test`/`npm run test:e2e`/`pytest` commands, and a troubleshooting section (CORS/env mismatches, DB-down fail-fast vs. Redis-down lazy-degrade, missing venv, Playwright needing the backend already running).
+- `CLAUDE.md` changes: one-line pointer added right after the intro, directing human "how do I run this" questions to the new `README.md` instead of duplicating those steps here.
+
 ---
 
 ## Not Done Yet — Next Steps

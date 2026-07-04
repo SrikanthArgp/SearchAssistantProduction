@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+For human-facing "how do I run this locally and test it" steps covering both `backend/` and `frontend/` together, see the root `README.md` — this file focuses on codebase structure and conventions for Claude Code sessions.
+
 ## Repository layout
 
 This is a monorepo: all Python backend code lives under **`backend/`**, which is its own project root — `backend/pyproject.toml`, `backend/uv.lock`, `backend/.venv`, `backend/.env`. **Every command below runs from inside `backend/`, not the repo root.** `plan.md`/`completed.md`/`CLAUDE.md` stay at the repo root since they're cross-cutting project docs (they also cover the Phase 7/8 `frontend/` work once that exists) — note that path references inside those two files predate this restructure and are written relative to the *old* flat layout, not `backend/`.
