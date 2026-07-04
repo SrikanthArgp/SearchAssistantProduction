@@ -25,7 +25,7 @@ This plan transforms it into a production REST API with:
 Multi-Agent/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                 # NEW (Phase 14): lint + fast test suite on push/PR
+│       └── ci.yml                 # NEW (Phase 15): lint + fast test suite on push/PR
 ├── config.py                       # NEW (Phase 6): pydantic-settings Settings class, get_settings() — single source of truth for all env vars
 ├── api/
 │   ├── __init__.py
@@ -84,8 +84,8 @@ Multi-Agent/
 ├── observability/
 │   ├── __init__.py
 │   ├── langfuse_client.py         # get_langfuse_handler() factory — shared by main.py, api/routers/chat.py, eval/
-│   ├── otel_client.py             # NEW (Phase 13): setup_otel(app, db_engine) — TracerProvider/LoggerProvider + OTLP exporters, auto-instruments FastAPI/SQLAlchemy/Redis
-│   └── logging_config.py          # NEW (Phase 13): structlog config; injects trace_id/span_id from the active OTel span into every log line
+│   ├── otel_client.py             # NEW (Phase 14): setup_otel(app, db_engine) — TracerProvider/LoggerProvider + OTLP exporters, auto-instruments FastAPI/SQLAlchemy/Redis
+│   └── logging_config.py          # NEW (Phase 14): structlog config; injects trace_id/span_id from the active OTel span into every log line
 │
 ├── chains/                        # UNCHANGED
 ├── nodes/                         # UNCHANGED
@@ -99,7 +99,11 @@ Multi-Agent/
 ├── requirements.txt               # EXTENDED
 ├── .env                           # EXTENDED
 ├── .env.example                   # UPDATED
-└── frontend/                       # NEW (Phases 7–8): separate Next.js app (own package.json) — see Phase 7 (auth) and Phase 8 (chat UI) for full tree
+├── Dockerfile                      # NEW (Phase 10): python:3.12-slim, uvicorn CMD — backend image; gains the Lambda Web Adapter layer in Phase 16
+├── docker-compose.yml               # NEW (Phase 10): backend + frontend + redis services (Postgres stays Supabase, not containerized)
+├── .dockerignore                    # NEW (Phase 10): .venv, .chroma, __pycache__, .env
+├── frontend/                       # NEW (Phases 7–8): separate Next.js app (own package.json) — see Phase 7 (auth) and Phase 8 (chat UI) for full tree; gets its own Dockerfile in Phase 10, static-exported to S3 in Phase 16
+└── infra/                           # NEW (Phase 16–17): Terraform root — providers, S3+DynamoDB remote state, Lambda/API Gateway/CloudFront resources (Phase 16), ECS/ALB resources added in Phase 17
 ```
 
 ---
@@ -265,7 +269,7 @@ On every authenticated request:
 - All keys have explicit TTLs; LRU eviction naturally expires stale session caches first.
 
 ### Fallback on Redis unavailability
-`cache/sessions.py` (Phase 4) does **not** decide fallback behavior itself — it's a thin, raw-Redis-ops layer with no knowledge of whether a DB fallback exists for a given call. **Retrofit applied (2026-07-03)**: every function now catches `redis.exceptions.RedisError` and re-raises `cache.exceptions.CacheUnavailableError` — a normalized, library-agnostic exception, not a raw redis-py error escaping the module. The fallback *decision* still belongs one layer up, in the **Phase 6 routers** (`api/routers/sessions.py`, `api/routers/chat.py`) that call it: catch `CacheUnavailableError`, log a warning (trace-correlated, via Phase 13's logger), and fall through to the same DB query already used for a cache *miss*. This means a Redis outage degrades to DB-only reads instead of 500s.
+`cache/sessions.py` (Phase 4) does **not** decide fallback behavior itself — it's a thin, raw-Redis-ops layer with no knowledge of whether a DB fallback exists for a given call. **Retrofit applied (2026-07-03)**: every function now catches `redis.exceptions.RedisError` and re-raises `cache.exceptions.CacheUnavailableError` — a normalized, library-agnostic exception, not a raw redis-py error escaping the module. The fallback *decision* still belongs one layer up, in the **Phase 6 routers** (`api/routers/sessions.py`, `api/routers/chat.py`) that call it: catch `CacheUnavailableError`, log a warning (trace-correlated, via Phase 14's logger), and fall through to the same DB query already used for a cache *miss*. This means a Redis outage degrades to DB-only reads instead of 500s.
 
 ---
 
@@ -377,13 +381,13 @@ async def http_exception_handler(request, exc):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):
-    logger.exception("unhandled_exception", request_id=request.state.request_id)  # full traceback, trace-correlated via Phase 13
+    logger.exception("unhandled_exception", request_id=request.state.request_id)  # full traceback, trace-correlated via Phase 14
     return JSONResponse(status_code=500, content={"detail": "internal server error"})
 ```
 Every error response — expected (`HTTPException`) or not — returns the same `{"detail": ...}` shape; only the unhandled case gets a full server-side traceback log.
 
-### Auth endpoint rate limiting (separate from Phase 11's per-user limiter)
-Phase 11's rate limiter is keyed by authenticated user ID — useless for `/v1/auth/login` and `/v1/auth/register`, which run *before* any identity exists and are the actual brute-force/credential-stuffing target. Same Redis `INCR`-bucket pattern, different key: `ratelimit:auth:{client_ip}`, stricter window (e.g. 10 req/min vs. the general 60 req/min), applied only to those two routes.
+### Auth endpoint rate limiting (separate from Phase 12's per-user limiter)
+Phase 12's rate limiter is keyed by authenticated user ID — useless for `/v1/auth/login` and `/v1/auth/register`, which run *before* any identity exists and are the actual brute-force/credential-stuffing target. Same Redis `INCR`-bucket pattern, different key: `ratelimit:auth:{client_ip}`, stricter window (e.g. 10 req/min vs. the general 60 req/min), applied only to those two routes.
 
 ---
 
@@ -392,7 +396,7 @@ Phase 11's rate limiter is keyed by authenticated user ID — useless for `/v1/a
 **Principle (2026-07-03):** the app must never crash outright, on either side — it should degrade gracefully (a clear error, a retry, a fallback answer) instead. This is stronger than the Phase 6 global exception handler alone. That handler already stops one bad *request* from crashing the FastAPI *process* (Starlette's exception middleware catches per-request errors regardless of whether this plan does anything extra — confirmed, not assumed). What it does **not** cover, and what nothing in this plan covered until now:
 
 1. **LangGraph node-level failures.** A code audit of the already-built app found **zero exception handling anywhere** in `nodes/*.py`, `chains/*.py`, `graph.py`, or `main.py` — an OpenAI timeout, a Tavily outage, or a Chroma retrieval error currently crashes the whole CLI run today, and would crash the whole `app.stream()` call inside a future request (the Phase 6 handler would catch it and return a 500, but the user gets no useful answer, and the specific cause is buried in an unstructured traceback). **Addressed in Phase 5**, since that's where `graph.py` is already being touched: wrap each node's external call (LLM invoke, Tavily invoke, Chroma retrieve) in try/except with a bounded retry (`tenacity`, 2 attempts, exponential backoff) for transient errors, and a graceful degrade when retries are exhausted (e.g. `web_search` returns an empty result set so `generate` still runs on whatever documents exist, rather than raising) — no external-dependency exception should ever reach `main.py` or the API layer unhandled.
-2. **`auth/dependencies.py`'s revocation check is unguarded** (Phase 3, already shipped and tested) — `is_token_revoked`'s Redis call has no try/except, so a Redis outage during authentication currently raises a raw, uncaught exception instead of a clean response. **Decision: fail open, not closed** — if Redis is unreachable, log a warning (trace-correlated, Phase 13) and allow the request through rather than rejecting it. Rationale: the JWT signature + expiry check is the primary security control; the revocation check is defense-in-depth for the narrower case of an explicitly logged-out-but-not-yet-expired token. Rejecting every authenticated request in the app because of a transient Redis blip is a worse outcome than a brief window where revocation enforcement is best-effort. This is a small, contained fix to already-completed code — see `completed.md` for whether/when it's applied.
+2. **`auth/dependencies.py`'s revocation check is unguarded** (Phase 3, already shipped and tested) — `is_token_revoked`'s Redis call has no try/except, so a Redis outage during authentication currently raises a raw, uncaught exception instead of a clean response. **Decision: fail open, not closed** — if Redis is unreachable, log a warning (trace-correlated, Phase 14) and allow the request through rather than rejecting it. Rationale: the JWT signature + expiry check is the primary security control; the revocation check is defense-in-depth for the narrower case of an explicitly logged-out-but-not-yet-expired token. Rejecting every authenticated request in the app because of a transient Redis blip is a worse outcome than a brief window where revocation enforcement is best-effort. This is a small, contained fix to already-completed code — see `completed.md` for whether/when it's applied.
 3. **Frontend crash containment is incomplete by construction.** Next.js `error.tsx` boundaries only catch errors thrown during React's **render phase** — they do *not* catch errors in event handlers (`onClick`) or async code (`fetch().then()`), which is most of what a chat app actually does. Without explicit handling, a malformed API response or a dropped SSE connection produces a silent failure or an unhandled promise rejection, not a graceful stop. **Addressed in Phase 7/8**: a root `app/error.tsx` boundary so a render-phase crash never blanks the *whole* app (only the affected subtree), plus explicit try/catch in `lib/api.ts` and `lib/sse.ts` around every network/parse operation, surfaced as UI state — never an unhandled rejection.
 
 ### Backend pattern
@@ -408,7 +412,7 @@ def web_search(state: GraphState) -> GraphState:
     try:
         results = _call_tavily(state["question"])
     except Exception:
-        logger.warning("web_search_failed", question=state["question"])  # trace-correlated, Phase 13
+        logger.warning("web_search_failed", question=state["question"])  # trace-correlated, Phase 14
         results = []  # graceful degrade — generate() still runs on whatever documents already exist
     ...
 ```
@@ -487,7 +491,7 @@ async def lifespan(app: FastAPI):
 
 **Decision (2026-07-02):** use **Langfuse Cloud** for agent observability, **replacing** the LangSmith tracing this plan originally specified. One dashboard, one set of API keys, no double-instrumentation. Langfuse traces every node/chain/LLM call in the CRAG graph (routing decision, retrieval, grading, generation, hallucination/answer checks) with latency, token cost, and full input/output per step — and doubles as the dataset/scoring backend for Phase 9's RAGAS eval suite, so evals and production traces live in the same place.
 
-Implementation note: this should be wired in as soon as `create_app()` exists (Phase 5) so every subsequent phase's manual testing is already traced — it's numbered Phase 12 below only to avoid renumbering the phases this doc (and `completed.md`, `tests/phaseN_*/`, `test_reports/phaseN_*/`) already references elsewhere.
+Implementation note: this should be wired in as soon as `create_app()` exists (Phase 5) so every subsequent phase's manual testing is already traced — it's numbered Phase 13 below purely for doc/folder consistency with `completed.md`/`tests/phaseN_*/`/`test_reports/phaseN_*/`, not because the wiring waits that long.
 
 ### `observability/langfuse_client.py`
 ```python
@@ -629,7 +633,7 @@ APP_HOST=0.0.0.0
 APP_PORT=8000
 CORS_ORIGINS=http://localhost:3000
 
-# Rate limiting — auth endpoints (separate, stricter bucket from Phase 11's general per-user limiter)
+# Rate limiting — auth endpoints (separate, stricter bucket from Phase 12's general per-user limiter)
 RATE_LIMIT_AUTH_PER_MINUTE=10
 
 # Frontend (frontend/.env.local, not the backend .env)
@@ -736,7 +740,7 @@ tenacity==9.*
 1. Modify `graph.py`: extract `create_app(checkpointer)` factory; remove module-level compile and `draw_mermaid_png`
 2. Modify `main.py`: instantiate `MemorySaver()` locally; call `create_app()`; wrap the `app.stream(...)` call in a top-level try/except as defense-in-depth, printing a clear message instead of a raw traceback
 3. Inline LangChain Hub prompt in `chains/generation.py`
-4. `observability/langfuse_client.py`: `get_langfuse_handler()` factory; wire it into `main.py`'s `app.stream(...)` call — see [Observability](#observability-langfuse). Doing this now (not deferred to Phase 12) means every phase after this one is already traced.
+4. `observability/langfuse_client.py`: `get_langfuse_handler()` factory; wire it into `main.py`'s `app.stream(...)` call — see [Observability](#observability-langfuse). Doing this now (not deferred to Phase 13) means every phase after this one is already traced.
 5. `nodes/retrieve.py`, `nodes/web_search.py`, `nodes/generate.py`, `nodes/grade_documents.py`, `graph.py`'s `route_question`/`grade_generation_grounded_in_documents_and_question`: wrap each external call (Chroma retrieve, Tavily invoke, LLM invoke — including the retrieval/hallucination/answer graders and the router, not just generation) with a bounded `tenacity` retry (2 attempts, exponential backoff) for transient errors, and a graceful degrade on exhaustion — see the Backend pattern in [Resilience & Crash Prevention](#resilience--crash-prevention-backend--frontend). `generate()` is the one exception: it has no lower-fidelity fallback to degrade to, so it re-raises after retries are exhausted and lets `main.py`'s top-level handler report it, rather than returning a canned answer that would likely fail hallucination grading and loop.
 6. Testing: `pytest chains/tests/` still passes (7/7) against the refactored `create_app()` factory and inlined prompt — regression check that extracting the factory and adding retry/degrade logic didn't change happy-path chain/node behavior. **Failure-path** (`tests/phase5_graph/test_resilience.py`, 8 tests): patches each `_call_*`/`_grade_*`/`_route_question` tenacity-wrapped helper to always raise (retries exhausted) and asserts the documented degrade — `retrieve`/`web_search` degrade to empty documents/results, `grade_documents` degrades to `web_search=True`, `route_question` defaults to `websearch`, both graders in `grade_generation_grounded_in_documents_and_question` default to `"useful"` — except `generate()`, which is asserted to propagate the exception.
 7. Verify: `python main.py` runs end-to-end — both the direct-to-websearch path and the RAG path (including the RAG→partial-relevance→websearch fallback mid-graph) were run manually and produced correct answers. Langfuse trace confirmed live via the public API once real keys were added (see retrofit note above).
@@ -762,7 +766,7 @@ tenacity==9.*
 11. Testing (`tests/phase6_api/`, 24 tests): `httpx.AsyncClient` + `ASGITransport` (with `raise_app_exceptions=False` - see the note in `tests/phase6_api/conftest.py` about why the default `True` hides the exact 500-envelope behavior these tests need to assert on) against the live DB via the same SAVEPOINT-rollback pattern as Phase 2, plus `fakeredis` and a `FakeGraph`/`FailingGraph` test double for the graph dependency. Covers register/login/refresh/logout/me, session CRUD with cross-user ownership enforcement, chat sync-invoke and SSE-stream happy paths (fast, no real LLM calls) plus one `@pytest.mark.integration` test with the real graph, and the IP-based auth rate limiter returning `429` past the threshold. **Failure-path**: `get_db()` unit-tested directly against an unreachable-host engine, injecting the resulting `OperationalError` via `gen.athrow(...)` (mirroring how FastAPI actually tears down a yield-dependency on an endpoint exception) and asserting `503`; a non-`OperationalError`, non-`HTTPException` failure in a dependency asserted to produce the generic handler's `{"detail": "internal server error"}` envelope, not a leaked traceback; the CRAG-graph-fails path asserted to return `502` (sync) / an `{"type": "error"}` SSE frame (stream) rather than crashing the request.
 
 ### Phase 7 — Next.js Frontend: Auth (Day 5–6)
-Split from the chat UI (Phase 8) because they're genuinely different problems: this phase is entirely about getting the token lifecycle right (login, register, silent refresh, logout, route protection) with nothing to visually show for it beyond forms — worth its own phase and its own manual test pass before any chat UI complexity gets layered on top. Both together were "Phase 7 — Next.js Frontend" before this split. Separate Next.js project (own `package.json`), App Router + TypeScript + Tailwind — a `frontend/` subdirectory of this repo, not part of the Python project. Built right after the API exists and is smoke-tested — nothing in Phases 9–14 changes the API contract, so building the UI here (instead of last) surfaces real contract problems while they're still cheap to fix.
+Split from the chat UI (Phase 8) because they're genuinely different problems: this phase is entirely about getting the token lifecycle right (login, register, silent refresh, logout, route protection) with nothing to visually show for it beyond forms — worth its own phase and its own manual test pass before any chat UI complexity gets layered on top. Both together were "Phase 7 — Next.js Frontend" before this split. Separate Next.js project (own `package.json`), App Router + TypeScript + Tailwind — a `frontend/` subdirectory of this repo, not part of the Python project. Built right after the API exists and is smoke-tested — nothing in Phases 9–15 changes the API contract, so building the UI here (instead of last) surfaces real contract problems while they're still cheap to fix.
 
 **Auth token handling:** access token in memory only (React context, never `localStorage`), attached as an `Authorization: Bearer` header on every request directly to FastAPI (no BFF/proxy layer — see [Key Design Decisions](#key-design-decisions) for why the refresh token needs different treatment than the access token).
 
@@ -825,7 +829,34 @@ frontend/
 6. Run baseline: `python -m eval.run_eval --experiment-name baseline-v1`
 7. Record baseline scores and Langfuse dataset-run URL — these become regression thresholds for CI
 
-### Phase 10 — Test Hardening (Day 8)
+### Phase 10 — Dockerization (Local Docker Desktop) (Day 8–9)
+**Decision (2026-07-03):** containerize the whole stack — backend, frontend, and Redis — so the app runs with one command on local Docker Desktop, as a deliberate checkpoint before any future enterprise-grade deployment pass (see [Deferred to a Future Enterprise-Grade Pass](#deferred-to-a-future-enterprise-grade-pass)). Postgres stays on Supabase, not containerized — it's already a managed connection string, and running a second local Postgres would just create a schema-drift risk against the real `setup/db_setup.md`-provisioned tables. This absorbs and extends what used to be Phase 11 steps 2–3 (backend `Dockerfile` + `docker-compose.yml`), now split out into its own phase and given a matching frontend image so both halves of the app are containerized together, not just the API.
+1. `Dockerfile` (repo root, backend) — `python:3.12-slim`, installs via `uv`, `CMD ["python", "run_api.py"]` (not `uvicorn api.main:app` directly — same Windows-loop-factory reasoning doesn't apply inside the Linux container, but keeping the entrypoint identical to local dev avoids a second code path to maintain)
+2. `frontend/Dockerfile` — multi-stage Next.js build: `node:20-slim` builder stage (`npm ci && npm run build`) → slim runtime stage copying `.next/standalone` output (`next.config.js` needs `output: "standalone"`) → `CMD ["node", "server.js"]`
+3. `.dockerignore` (root) and `frontend/.dockerignore` — exclude `.venv`/`node_modules`, `.chroma`, `.env`/`.env.local`, `__pycache__`, `.next`
+4. `docker-compose.yml` (root) — three services:
+   ```yaml
+   services:
+     redis:
+       image: redis:7
+       ports: ["6379:6379"]
+     backend:
+       build: .
+       env_file: .env
+       ports: ["8000:8000"]
+       depends_on: [redis]
+     frontend:
+       build: ./frontend
+       env_file: frontend/.env.local
+       ports: ["3000:3000"]
+       depends_on: [backend]
+   ```
+   `backend`'s `REDIS_URL` and `frontend`'s `NEXT_PUBLIC_API_BASE_URL` are set to the compose service DNS names (`redis`, `backend`), not `localhost` — a common first-run break since it works from the host but not container-to-container. Postgres (Supabase) is reached the same way either way, since it's already remote.
+5. Verify Chroma persistence survives a container restart: the backend image bind-mounts `multi_agent/.chroma/` (`volumes: ["./multi_agent/.chroma:/app/multi_agent/.chroma"]`) rather than baking it into the image, so re-ingesting on every rebuild isn't required
+6. Testing: `docker compose up --build` from a clean state (no local `.venv`/`node_modules` needed on the host at all) — confirm all three containers report healthy, then run the same manual smoke test as Phase 8's (register → login → create session → chat → SSE stream, from the browser at `localhost:3000`) entirely through the containerized stack. **Failure-path**: stop the `redis` container mid-session and confirm the app degrades per the existing Redis-fallback behavior (Phase 4/6), not a crash — same assertion as those phases' tests, just re-run against real containers instead of `fakeredis`, to catch anything container networking hides that a mock wouldn't
+7. Document the one-command flow in a root `README.md` section: `docker compose up --build`, plus which two `.env` files (`./.env`, `frontend/.env.local`) must exist first since compose doesn't create them
+
+### Phase 11 — Test Hardening (Day 9)
 Consolidates fixtures and tiering for tests that already exist from each phase's own testing step above — doesn't invent test coverage from scratch.
 1. Add `chains/tests/conftest.py` with fixtures for DB, Redis, HTTP client, authenticated user
 2. Mark existing LLM-calling tests with `@pytest.mark.integration`
@@ -839,23 +870,21 @@ Consolidates fixtures and tiering for tests that already exist from each phase's
    npm run test:e2e              # frontend e2e
    ```
 
-### Phase 11 — Production Hardening (Day 9, optional)
-1. Structured logging (`structlog`): include `request_id`, `user_id`, `session_id` in every log line (baseline stdout output only — trace-correlated OTLP export to Grafana Cloud is added in Phase 13, not redone here)
-2. `Dockerfile` (python:3.12-slim, uvicorn CMD)
-3. `docker-compose.yml` with `app` and `redis:7` services only — Postgres is provided by Supabase, no local container needed
-4. Rate limiting middleware (Redis INCR per user per minute bucket; reject at 60 req/min) — general-purpose, for authenticated endpoints. Auth endpoints already have their own stricter IP-based limiter from Phase 6.
-5. `/health` endpoint with real `SELECT 1` DB check and Redis `PING`
-6. Testing: hit `/health` with both dependencies up (expect 200) and again with the Redis container stopped (expect the documented degraded response, not a 500); a test that exceeds the general rate limit bucket and confirms 429
+### Phase 12 — Production Hardening (Day 9–10, optional)
+1. Structured logging (`structlog`): include `request_id`, `user_id`, `session_id` in every log line (baseline stdout output only — trace-correlated OTLP export to Grafana Cloud is added in Phase 14, not redone here)
+2. Rate limiting middleware (Redis INCR per user per minute bucket; reject at 60 req/min) — general-purpose, for authenticated endpoints. Auth endpoints already have their own stricter IP-based limiter from Phase 6.
+3. `/health` endpoint with real `SELECT 1` DB check and Redis `PING`
+4. Testing: hit `/health` with both dependencies up (expect 200) and again with the Redis container stopped (expect the documented degraded response, not a 500); a test that exceeds the general rate limit bucket and confirms 429
 
-### Phase 12 — Observability (Langfuse)
-> Numbered last for doc/folder consistency only — the actual wiring happens in **Phase 5, step 4** above, as soon as `create_app()` exists. This phase entry exists so `completed.md`/`tests/`/`test_reports/` have a phase slot to track it against, matching every other phase in this plan.
+### Phase 13 — Observability (Langfuse)
+> Numbered here for doc/folder consistency only — the actual wiring happens in **Phase 5, step 4** above, as soon as `create_app()` exists. This phase entry exists so `completed.md`/`tests/`/`test_reports/` have a phase slot to track it against, matching every other phase in this plan.
 1. `observability/langfuse_client.py`: `get_langfuse_handler()` (done in Phase 5)
 2. Wire the handler into `api/routers/chat.py`'s sync-invoke and SSE-stream paths (Phase 6), with `langfuse.propagate_attributes(trace_name=..., user_id=..., session_id=...)` so traces are filterable per user/session
 3. Wire the handler into `eval/langfuse_eval.py` via `item.get_langchain_handler(...)` (Phase 9)
 4. Testing: unit test that `get_langfuse_handler()` returns a `CallbackHandler` without raising when the required env vars are set — so a missing/misconfigured Langfuse key fails a fast test in CI instead of silently disabling tracing in production
 5. Verify: run a few chat requests through the API, confirm traces appear in the Langfuse Cloud dashboard with correct user/session tags and per-node latency/cost breakdown
 
-### Phase 13 — Observability (OpenTelemetry + Grafana Cloud) (Day 10)
+### Phase 14 — Observability (OpenTelemetry + Grafana Cloud) (Day 10)
 1. Create a free Grafana Cloud stack; retrieve the OTLP gateway endpoint, instance ID, and API token; add the new env vars
 2. `observability/logging_config.py`: structlog config with the trace_id/span_id injection processor, JSON renderer, bridged into stdlib `logging`
 3. `observability/otel_client.py`: `setup_otel(app, db_engine)` — TracerProvider/LoggerProvider + OTLP exporters; instrument FastAPI, SQLAlchemy, Redis
@@ -865,11 +894,54 @@ Consolidates fixtures and tiering for tests that already exist from each phase's
 7. Testing: unit test `setup_otel()` against an in-memory `InMemorySpanExporter` (not the real OTLP endpoint) — confirms FastAPI/SQLAlchemy/Redis spans are actually created for a sample request, runs offline in CI, independent of whether Grafana Cloud is reachable
 8. Verify: hit a few API endpoints, confirm nested FastAPI → SQLAlchemy → Redis spans appear in Grafana Cloud's Tempo explorer, and structured logs appear in Loki with matching `trace_id` fields (clickable through to the trace via Loki's derived fields)
 
-### Phase 14 — CI Pipeline (Day 10, light)
+### Phase 15 — CI Pipeline (Day 10, light)
 Deliberately minimal — lint + fast tests on push, nothing more (no deploy target chosen, so no build/push/deploy stage).
 1. `.github/workflows/ci.yml`: triggers on push/PR to `main`
-2. Steps: checkout → set up Python (via `uv`) → `uv sync --extra dev` → `ruff check .` → `pytest -m "not integration"` (the fast unit tier from Phase 10; integration tests need real API keys/DB and are intentionally excluded from CI for this learning-scoped project)
+2. Steps: checkout → set up Python (via `uv`) → `uv sync --extra dev` → `ruff check .` → `pytest -m "not integration"` (the fast unit tier from Phase 11; integration tests need real API keys/DB and are intentionally excluded from CI for this learning-scoped project)
 3. Verify: push a branch with a deliberate lint error and a deliberate failing test, confirm both fail the workflow; fix both, confirm it goes green
+
+### Phase 16 — AWS Serverless Deployment (Lambda + API Gateway + CloudFront), Terraform via LocalStack first (Day 11–12)
+**Decision (2026-07-03):** every service below is picked specifically to keep this at or near $0/month at learning-project traffic — see the Key Design Decisions rows for the reasoning behind each swap from the "obvious" choice.
+
+**Services:** AWS Lambda (container image) for compute; **AWS Lambda Web Adapter** (not Mangum — Mangum buffers the entire ASGI response and cannot relay a `StreamingResponse`/SSE; the adapter runs the real `uvicorn` process and proxies to it, so `run_api.py` doesn't change) as the runtime shim; a **Lambda Function URL** (`invoke_mode = RESPONSE_STREAM`) for the chat/stream routes specifically, bypassing API Gateway's 29s integration timeout and response buffering; **API Gateway HTTP API** (v2, not REST API — roughly a third of the per-request cost) for everything else (`/v1/auth/*`, `/v1/sessions` CRUD, `/health`); **S3 + CloudFront** for the frontend, built as a Next.js **static export** rather than an SSR Lambda (no OpenNext needed, since `AuthProvider`'s route guard is already client-side/in-memory — confirm nothing relies on Next.js middleware before exporting); **Upstash Redis** (external, HTTP-based, real free tier) in place of ElastiCache — this also removes any reason for Lambda to sit in a VPC, since Upstash and the existing Supabase pooler are both public HTTPS endpoints, which avoids a NAT Gateway (~$32/month), the single biggest avoidable cost here; Supabase Postgres unchanged; **SSM Parameter Store** (Standard tier, free) instead of Secrets Manager ($0.40/secret/month) for the JWT key, OpenAI/Tavily keys, Upstash URL, DB URL; Terraform state in an S3 backend + DynamoDB lock table (pay-per-request billing — effectively free at this scale).
+
+1. `infra/` — new Terraform root: `aws` provider pinned to a region, S3 + DynamoDB remote state, variables for account/region/secret names
+2. Add the AWS Lambda Web Adapter layer to the backend `Dockerfile` (`AWS_LWA_INVOKE_MODE=RESPONSE_STREAM`, `PORT=8000`) — verify the image still runs unchanged via plain `docker run` before touching Terraform at all
+3. Terraform: ECR repo + pushed image; `aws_lambda_function` (image-based); `aws_lambda_function_url` (`RESPONSE_STREAM`) for the chat routes; `aws_apigatewayv2_api` + Lambda proxy integration + routes for everything else; an IAM execution role scoped to just `ssm:GetParameter` + CloudWatch Logs
+4. Terraform: SSM `SecureString` parameters for every secret currently in `.env`; `config.py`'s `Settings` reads them via `boto3` at cold start when `APP_ENV=production`, falls back to `.env` locally — one class, two sources
+5. Frontend: switch to `output: "export"`, audit for server-only Next.js features that would break under a static export, build, upload to a private S3 bucket
+6. Terraform: S3 bucket (private, Origin Access Control) + one CloudFront distribution with three path-based behaviors — default → S3, `/v1/sessions/*/stream` (and the sync message-send route) → the Function URL with caching disabled, everything else under `/v1/*` → the HTTP API. Skip a custom domain/ACM cert for now (use the CloudFront default domain) to stay fully in the free tier
+7. **Validate on LocalStack, using its 45-day free Ultimate-tier trial (no credit card required)** — corrected 2026-07-03 from an earlier, now-stale assumption: LocalStack replaced its old Community/Pro split with Hobby (free)/Base ($39–45/mo)/Ultimate ($89/mo) tiers, and the free **Hobby** tier only covers Lambda/S3/IAM/SSM plus the **REST** API Gateway — not the **HTTP** API Gateway or CloudFront this phase actually uses, both of which need Base or higher. The 45-day Ultimate trial covers everything in this phase (and Phase 17's ECS/ALB) for free, so activate it only once actually ready to build — don't start the clock early — and do all local Terraform validation for both phases inside that one window before it reverts to Hobby
+8. Point Terraform at real AWS, `terraform apply`, run the same manual smoke test as Phase 10 (register → login → create session → chat → SSE stream) against the live CloudFront URL
+9. Testing: `curl -N` (or equivalent) directly against the Function URL confirming chunks arrive incrementally, not buffered; a cold-start-latency spot check; confirm the auth rate limiter and Redis-down fail-open behavior still hold with Upstash instead of `fakeredis`/local Redis. **Failure-path**: temporarily break the Upstash URL and confirm the same graceful-degrade behavior from Phase 4/6, this time against a real HTTP-based client
+10. Document `terraform destroy` as the default between demos — nothing here should be left running 24/7 by accident
+
+### Phase 17 — AWS Container Deployment: ECS Fargate (Day 12–13)
+**Decision (2026-07-03):** originally scoped as EKS; swapped to **ECS Fargate** for this pass specifically because affordability was the stated priority — EKS's control plane is a flat ~$0.10/hr (~$73/month) regardless of usage, on top of whatever compute runs the pods, while ECS has no control-plane fee at all. ECS Fargate also removes the entire SSE/Lambda-timeout workaround from Phase 16: a long-lived container behind a load balancer streams `StreamingResponse` natively, no Function URL/adapter needed. If the goal shifts from "cheapest second deployment target" to "learn real Kubernetes regardless of cost," EKS is a straightforward substitution at this same phase slot — noted explicitly rather than silently decided.
+
+1. Reuse Phase 16's VPC (or a minimally-sized new one) — Fargate tasks always require a VPC, unlike the Lambda in Phase 16 which deliberately avoided one — but give each task a **public IP directly** (public subnet + Internet Gateway route) instead of a private subnet + NAT Gateway, keeping this phase's mandatory networking cost at the Internet Gateway (free) rather than NAT (~$32/month)
+2. Terraform: `aws_ecs_cluster` (no charge for the cluster itself, only running tasks are billed); `aws_ecs_task_definition` referencing the **same ECR image built for Lambda, minus the Lambda Web Adapter layer** (plain `CMD ["python", "run_api.py"]` — real `uvicorn` behind a real load balancer, no adapter needed); `aws_ecs_service` at the cheapest Fargate size (0.25 vCPU / 0.5 GB), desired count 1 (single instance — no HA yet, a deliberate cost/availability tradeoff for a learning deployment, not an oversight)
+3. Terraform: `aws_lb` (Application Load Balancer) + target group (health check on `/health`) + HTTPS listener; security groups (ALB open on 443, the ECS task only reachable from the ALB's security group)
+4. Terraform: `aws_appautoscaling_target`/`policy` on the ECS service (target-tracking on CPU, e.g. scale out above 70%) — a native AWS resource, no cluster-autoscaler/metrics-server equivalent to install, unlike the EKS alternative
+5. CloudFront: same distribution shape as Phase 16 but simplified — the ALB origin handles both streaming and non-streaming routes natively, so the Function-URL-vs-HTTP-API path split collapses into one `/v1/*` → ALB behavior; the S3 frontend origin is reused unchanged
+6. Same secrets/cache/DB choices as Phase 16 (SSM Parameter Store, Upstash Redis, Supabase Postgres) — reused, not rebuilt, since none of those choices were Lambda-specific
+7. Validate on the same LocalStack Ultimate trial from Phase 16, step 7 — ECS and ALB both require Base or higher (neither is in the free Hobby tier at all, not just "more limited"), so this phase specifically depends on that trial window rather than having its own free fallback. If the trial has already lapsed by the time this phase is built, real ECS Fargate + ALB only costs ~$1/day (see Cost Profile Summary), which is cheaper than a Base subscription just to validate Terraform locally — skip LocalStack and iterate directly against real AWS in a tight `apply` → smoke-test → `destroy` loop instead
+8. `terraform apply` against real AWS; run the same smoke test as Phase 16, this time confirming the SSE stream is genuinely token-by-token-shaped end-to-end with no adapter layer involved
+9. Testing: same Redis/DB failure-path checks as Phase 16; a load-balancer health-check failure test (stop the task, confirm the ALB marks the target unhealthy and stops routing to it); confirm auto-scaling actually adds a second task under a synthetic CPU-heavy load test
+10. Cost note: this phase's baseline (ALB ~$16–20/month **while it exists** + a small Fargate task) doesn't go to zero on `terraform destroy` the same way Phase 16 does, since the ALB has an hourly charge from the moment it's created — tear down between demos the same way, but budget for a different "leave it running" cost profile than Phase 16
+
+---
+
+## Cost Profile Summary (Phases 16–17)
+
+| | Phase 16 (Serverless) | Phase 17 (ECS Fargate) |
+|---|---|---|
+| Baseline cost at rest (deployed, no traffic) | ~$0 — everything pay-per-use or within a free tier | ALB hourly charge, roughly $16–20/month even at zero traffic |
+| Compute cost under light traffic | Pay-per-invocation, likely still $0 within Lambda's perpetual free tier (1M requests + 400,000 GB-s/month) | Pay-per-second for the running Fargate task — small, but non-zero even when idle |
+| Biggest avoidable cost in either phase | NAT Gateway — avoided by keeping Lambda out of a VPC entirely (Upstash + Supabase are both public HTTPS endpoints) | NAT Gateway — avoided by using public subnets + an Internet Gateway instead of private subnets + NAT for the Fargate task |
+| Recommended between-demo state | `terraform destroy` — genuinely $0 when torn down | `terraform destroy` — also $0 when torn down, just less "leave it running casually" friendly given the ALB's hourly charge |
+
+*Figures are ballpark, current as of this planning pass (2026-07-03) — check current AWS/Upstash pricing pages before relying on them for a real budget.*
 
 ---
 
@@ -889,9 +961,11 @@ Deliberately minimal — lint + fast tests on push, nothing more (no deploy targ
 | OTel/Grafana Cloud kept separate from Langfuse, correlated via `X-Request-ID` | Langfuse stays scoped to LLM/chain-level detail; OTel covers general app/DB/cache/audit — each tool used for what it's good at, without double-instrumenting LangChain calls |
 | `config.py` (pydantic-settings) for all *new* code; Phase 1–4 `os.getenv` calls left as-is | Fail-fast config validation at startup for everything going forward, without churning already-completed and already-tested modules |
 | Redis-down *fallback decision* lives in Phase 6 routers; `cache/sessions.py` only normalizes the error | `cache/sessions.py` catches `RedisError` and raises `CacheUnavailableError` (Phase 4 retrofit) so no raw redis-py exception ever escapes, but still doesn't decide what to do about it — the router already has the "on cache miss, query DB" path, so catching `CacheUnavailableError` there reuses it for free |
-| Separate, stricter IP-based rate limit on `/v1/auth/login` + `/v1/auth/register` | Phase 11's general limiter is keyed by authenticated user ID, which doesn't exist yet on these routes — the actual brute-force/credential-stuffing target needs its own bucket |
+| Separate, stricter IP-based rate limit on `/v1/auth/login` + `/v1/auth/register` | Phase 12's general limiter is keyed by authenticated user ID, which doesn't exist yet on these routes — the actual brute-force/credential-stuffing target needs its own bucket |
+| Full-stack Dockerization (backend + frontend + Redis) as its own Phase 10, right after the frontend exists (Phase 8) and before Test Hardening | Gives a one-command local run (`docker compose up --build`) as a deliberate checkpoint before any future enterprise-grade deployment pass — validates the app runs outside dev-server-with-hot-reload conditions while the app is still small, rather than discovering containerization issues only once deploying for real |
+| Postgres stays on Supabase (not containerized) even in the Phase 10 Docker Compose stack | Already a managed connection string; running a second local Postgres would risk schema drift against the tables `setup/db_setup.md` provisions manually |
 | `/v1` prefix on all API routes from the start | Trivial to add now, breaking/painful to retrofit once any client depends on unversioned paths |
-| Frontend built in Phases 7–8, right after the API exists, not last | Phases 9–14 are backend-quality work (eval, tests, hardening, observability, CI) that don't change the API contract — building the UI early surfaces real contract issues while cheap to fix, and gets the app to a usable end-to-end state sooner |
+| Frontend built in Phases 7–8, right after the API exists, not last | Phases 9–15 are backend-quality work (eval, Docker, tests, hardening, observability, CI) that don't change the API contract — building the UI early surfaces real contract issues while cheap to fix, and gets the app to a usable end-to-end state sooner |
 | Frontend split into Phase 7 (auth) and Phase 8 (chat UI) | Token lifecycle (login/register/silent-refresh/route-guard) and the chat experience (sessions, streaming, message history) are different problems with different failure modes — worth their own build-and-test pass each rather than one large phase |
 | Frontend: access token in memory, refresh token in `localStorage` | The chosen pattern (direct Bearer-token fetches to FastAPI, no BFF/httpOnly-cookie proxy) needs the refresh token to survive a page reload, or every reload would force re-login; accepted XSS-exposure tradeoff on the refresh token is mitigated by the existing short access-token TTL + Redis revocation check (Phase 3) |
 | Frontend SSE via `fetch` + `ReadableStream`, not `EventSource` | `EventSource` cannot send custom headers, so it can't carry the `Authorization: Bearer` token this app's auth design requires |
@@ -899,17 +973,24 @@ Deliberately minimal — lint + fast tests on push, nothing more (no deploy targ
 | Revocation-check Redis failure: fail open, not closed (Phase 3 retrofit) | JWT signature + expiry is the primary security control; the revocation check is defense-in-depth for the narrower logged-out-but-unexpired case — rejecting every authenticated request during a transient Redis blip is worse than a brief best-effort window on revocation enforcement |
 | Root + route-level `error.tsx` boundaries, plus explicit try/catch in `lib/api.ts`/`lib/sse.ts` | Next.js error boundaries only catch render-phase crashes, not event-handler or async errors — which is most of what a chat app's API/SSE code actually does — so boundaries alone are not sufficient and both are needed |
 | Failure-path test required in every phase's testing step, not just happy-path | Matches the resilience principle itself — untested error handling isn't trustworthy error handling; audit found the existing suite (Phases 1–4) was happy-path-only for every one of these failure modes |
+| API Gateway **HTTP API** (v2), not REST API, for all non-streaming routes (Phase 16) | Roughly a third of the per-request cost, simpler Lambda-proxy wiring; nothing in this app needs REST-API-only features (usage plans, request validation models) |
+| **AWS Lambda Web Adapter**, not Mangum, to run the backend on Lambda (Phase 16) | Mangum buffers the full ASGI response before returning it — incompatible with `StreamingResponse`/SSE. The adapter runs the real `uvicorn` process and proxies to it, so `run_api.py` needs zero code changes and streaming works exactly as it does locally |
+| **Lambda Function URL** (`RESPONSE_STREAM`) for chat routes, HTTP API for everything else (Phase 16) | Function URLs aren't subject to API Gateway's 29s integration timeout or response buffering — both real risks for a multi-LLM-call CRAG pipeline with retries; the rest of the API is fast enough that the cheaper HTTP API path is fine |
+| **Upstash Redis** (external, HTTP-based), not ElastiCache, for Phases 16–17 | Real free tier vs. ElastiCache's no-free-tier hourly node cost; also removes the only reason Lambda would need a VPC at all, since Upstash and the existing Supabase pooler are both public HTTPS endpoints — skipping the VPC skips a NAT Gateway (~$32/month), the single biggest avoidable cost in either deployment phase |
+| **SSM Parameter Store**, not Secrets Manager, for deployed secrets (Phases 16–17) | Standard-tier parameters are free; Secrets Manager charges per secret per month — meaningful at 5+ secrets for a project with no revenue to offset it |
+| Frontend as a Next.js **static export** to S3, not an SSR Lambda/OpenNext (Phase 16) | `AuthProvider`'s route guard is already client-side (in-memory token, React context) — no server component is actually needed, so a static export avoids a whole extra piece of serverless-Next.js tooling |
+| **ECS Fargate**, not EKS, for Phase 17 (cost-driven swap from the original plan) | EKS's control plane costs a flat ~$0.10/hr (~$73/month) regardless of usage, on top of node/pod compute; ECS has no control-plane fee. Also removes Phase 16's entire SSE/timeout workaround, since a long-lived Fargate container streams natively behind a plain ALB. Revisit as EKS specifically if the goal becomes "learn Kubernetes" rather than "cheapest second deployment target" |
+| Public subnets + Internet Gateway, not private subnets + NAT Gateway, for Fargate tasks (Phase 17) | A NAT Gateway (~$32/month) is one of the largest fixed AWS costs at this scale; a Fargate task only needs outbound access to Supabase/Upstash/OpenAI/Tavily, which a public IP + IGW route satisfies without one, at the (accepted, security-group-mitigated) cost of the task having a direct public IP |
 
 ---
 
 ## Deferred to a Future Enterprise-Grade Pass
 
-**Decision (2026-07-03):** Phases 1–14 above are the full scope for now. The items below were identified during planning as real gaps for an "industry-standard production-grade" app, but are **explicitly deferred** — revisit only after Phases 1–14 are built and absorbed, as a deliberate follow-up pass to take the app "one level higher" toward enterprise-grade. Not scheduled, not numbered as a phase yet.
+**Decision (2026-07-03):** Phases 1–15 above were the full scope as originally planned. **Deployment has since been given concrete shape as Phases 16–17** (AWS serverless via Lambda/API Gateway/CloudFront, then AWS containers via ECS Fargate — see those phases above) rather than staying an open-ended deferred item. The remaining items below are still real gaps for an "industry-standard production-grade" app, and are **still explicitly deferred** — revisit after Phases 1–17 are built and absorbed.
 
-- **Deployment.** Everything through Phase 14 runs on `localhost` (`uvicorn --reload`, `npm run dev`, Docker Compose for local Redis only). No public URL, no TLS, no real cross-origin `CORS_ORIGINS`/`NEXT_PUBLIC_API_BASE_URL` values. Likely shape when revisited: Vercel for the Next.js frontend, Render/Fly.io/Railway (or similar) for the FastAPI backend, both free-tier to start.
-- **Password-reset flow.** Register/login/refresh/logout exist; "forgot password" doesn't. Needs a transactional email piece (e.g., Resend/SendGrid free tier) to deliver the reset link — this is why it's grouped with deployment rather than done alongside the rest of Phase 7's auth work.
+- **Password-reset flow.** Register/login/refresh/logout exist; "forgot password" doesn't. Needs a transactional email piece (e.g., Resend/SendGrid free tier) to deliver the reset link — this is why it's grouped here rather than done alongside the rest of Phase 7's auth work.
 - **XSS via LLM-rendered markdown in the chat UI (Phase 8).** The CRAG pipeline pulls in web search results — untrusted content — that flows into the generated answer, which the chat UI renders. Needs the markdown renderer configured to strip/never execute raw HTML (e.g. `react-markdown` without `rehype-raw`) before this is safe to expose beyond local dev.
 - **Security response headers** (CSP, `X-Content-Type-Options`, `X-Frame-Options`, HSTS) — absent from both the API and the Next.js app.
-- **Secrets management** beyond `.env` files (e.g. a real secrets manager) — fine for local/learning use, a gap once anything is actually deployed.
+- **Secrets management beyond SSM Parameter Store.** Phases 16–17 add SSM `SecureString` parameters for deployed secrets (free, sufficient for a learning-scale deployment), but real secret **rotation**, fine-grained per-secret IAM policies, and audit-logged access — the things an actual enterprise secrets manager (Secrets Manager, Vault) adds over plain SSM — are still not in scope.
 
-Also flagged as optional/likely-skip even in a later pass, not just deferred: frontend error tracking (Sentry), account/session-device management UI, load testing, a dedicated staging environment.
+Also flagged as optional/likely-skip even in a later pass, not just deferred: frontend error tracking (Sentry), account/session-device management UI, load testing, a dedicated staging environment, and a custom domain + ACM certificate for Phases 16–17 (currently using CloudFront's default domain to stay in the free tier).
