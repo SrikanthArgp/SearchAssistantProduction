@@ -19,8 +19,10 @@ dependencies = [
     "beautifulsoup4>=4.12",
     # Resilience (Phase 5): bounded retries around external LLM/Tavily/Chroma calls
     "tenacity>=9.0",
-    # Observability (Phase 5/10): agent tracing
-    "langfuse>=3.0",
+    # Observability (Phase 5/10): agent tracing. Tightened from >=3.0 once Phase 9 code
+    # was written and verified against the actually-installed 4.13.0 (dataset.run_experiment,
+    # Evaluation, ExperimentResult.dataset_run_url are 4.x-only APIs) — see plan.md Phase 9.
+    "langfuse>=4.0,<5",
 ]
 
 [project.optional-dependencies]
@@ -51,8 +53,10 @@ prod = [
     "email-validator>=2.0",
 ]
 eval = [
-    "ragas>=0.2",
-    "langsmith>=0.1",
+    # Pinned — ragas 0.4.x's metric classes require an InstructorBaseRagasLLM (via
+    # ragas.llms.llm_factory), not the deprecated LangchainLLMWrapper; verified against the
+    # actually-installed version rather than the originally-planned 0.2.* (see plan.md Phase 9)
+    "ragas==0.4.*",
 ]
 dev = [
     "pytest>=8.0",

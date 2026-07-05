@@ -679,11 +679,11 @@ redis==5.2.*
 python-jose[cryptography]==3.3.*
 bcrypt>=4.0  # NOT passlib[bcrypt] — see Phase 3 note below
 alembic==1.14.*
-ragas==0.2.*
+ragas==0.4.*  # corrected 2026-07-05 from an assumed 0.2.* — see Phase 9 note
 pytest-asyncio==0.24.*
 httpx==0.27.*
 fakeredis==2.26.*
-langfuse==3.*
+langfuse==4.*  # corrected 2026-07-05 from an assumed 3.* — see Phase 9 note
 structlog==24.*
 opentelemetry-sdk==1.29.*
 opentelemetry-exporter-otlp==1.29.*
@@ -828,6 +828,12 @@ frontend/
 5. Testing: fast unit test (no LLM calls) that `eval/dataset.py` loads exactly 25 items with the correct routing split (20 `vectorstore` with `ground_truth`, 5 `websearch` with `ground_truth=None`) and that `eval/metrics.py`'s threshold dict has all 4 required keys — catches dataset/config typos before burning API calls on the real run below
 6. Run baseline: `python -m eval.run_eval --experiment-name baseline-v1`
 7. Record baseline scores and Langfuse dataset-run URL — these become regression thresholds for CI
+
+**Version-drift correction (2026-07-05):** the environment already had `ragas==0.4.3` and `langfuse==4.13.0` installed — newer than this plan's original `ragas==0.2.*`/`langfuse==3.*` assumptions, and both introduced real breaking changes. Verified directly against the installed packages before writing `eval/`:
+- **ragas 0.4.x**: `SingleTurnSample`/`single_turn_ascore` (the API this plan originally sketched) still exist but the metric classes now require an `InstructorBaseRagasLLM`/`BaseRagasEmbedding` (via `ragas.llms.llm_factory("gpt-4o-mini", client=AsyncOpenAI())` and `ragas.embeddings.OpenAIEmbeddings(client=...)`) — the old `LangchainLLMWrapper`/`LangchainEmbeddingsWrapper` are deprecated and fail an `isinstance` check against the new base classes, so they're silently rejected. `eval/metrics.py` uses `ragas.metrics.collections.{Faithfulness,AnswerRelevancy,ContextRecall,ContextPrecision}` with the modern `.ascore(user_input=, response=, retrieved_contexts=, reference=)` (returns a `MetricResult`, read via `.value`), not `.single_turn_ascore(sample)`.
+- **langfuse 4.x**: no `item.get_langchain_handler(run_name=...)` linking or manual `create_score`/`score_and_push` needed — `langfuse.get_dataset(name)` returns a `DatasetClient` with a `.run_experiment(name=, task=, evaluators=)` convenience method that runs the task per item, invokes evaluators (returning `Evaluation`/`list[Evaluation]`), and auto-creates+links the dataset run. The returned `ExperimentResult` carries `.item_results` (per-item `.output`/`.evaluations`) and `.dataset_run_url` directly — no manual project-ID/URL construction needed. `eval/langfuse_eval.py` and `eval/run_eval.py` are written against this.
+
+Pins corrected above (`ragas==0.4.*`, `langfuse==4.*`) and in `backend/pyproject.toml`'s `eval`/core dependency groups.
 
 **Deferred for Next (2026-07-05):** per-agent/per-node scoring — pushing a Langfuse score for the router's routing-accuracy (vectorstore vs. websearch, checked against the dataset's known routing label) and for the retrieval/hallucination/answer graders' own binary decisions. Today these graders run on every request and are visible as individual traced LLM calls inside each trace, but nothing scores whether their yes/no calls were *correct* — only the end-to-end RAGAS metrics against the final answer are scored. The 25-item dataset already carries the routing label this would need; revisit once the end-to-end suite above is running and baselined.
 
