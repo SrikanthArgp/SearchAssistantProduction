@@ -638,6 +638,9 @@ CORS_ORIGINS=http://localhost:3000
 # Rate limiting — auth endpoints (separate, stricter bucket from Phase 12's general per-user limiter)
 RATE_LIMIT_AUTH_PER_MINUTE=10
 
+# Rate limiting — general, per authenticated user (Phase 12), applied to sessions/chat routes
+RATE_LIMIT_GENERAL_PER_MINUTE=60
+
 # Frontend (frontend/.env.local, not the backend .env)
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/v1
 
@@ -878,7 +881,7 @@ Pins corrected above (`ragas==0.4.*`, `langfuse==4.*`) and in `backend/pyproject
 
 ### Phase 11 — Test Hardening (Day 9)
 Consolidates fixtures and tiering for tests that already exist from each phase's own testing step above — doesn't invent test coverage from scratch.
-1. Add `chains/tests/conftest.py` with fixtures for DB, Redis, HTTP client, authenticated user
+1. Add fixtures for DB, Redis, HTTP client, authenticated user to `tests/conftest.py` (corrected from an earlier draft's `chains/tests/conftest.py` — that directory only holds LLM chain tests with no DB/Redis/HTTP-client fixtures to share; the shared fixtures actually needed by phase2_database/phase6_api/phase12_production live at the top-level `tests/` package instead, where pytest's conftest auto-discovery makes them visible to every phase subdirectory without an import)
 2. Mark existing LLM-calling tests with `@pytest.mark.integration`
 3. Add any remaining fast unit tests (no LLM) not already covered per-phase: auth logic, cache logic, ownership validation
 4. `frontend/`: Vitest config for the component tests from Phases 7–8, Playwright config for the e2e tests — `npm run test` (fast) vs `npm run test:e2e` (spins up the dev server + backend)

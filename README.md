@@ -41,7 +41,9 @@ Verify it's up in another terminal:
 
 ```powershell
 curl http://localhost:8000/health
-# {"status":"ok"}
+# {"status":"ok","db":true,"redis":true}
+# ({"status":"degraded","db":true,"redis":false} if Redis is down - still 200, not an error;
+# Postgres unreachable is the only case that returns a non-200 here, since it's a hard dependency)
 ```
 
 Leave this terminal running.
@@ -83,15 +85,20 @@ Frontend, from `frontend/`:
 
 ```powershell
 npm run test        # Vitest component tests — no backend needed, ~3s
-npm run test:e2e    # Playwright e2e — needs the backend already running (step 2)
+npm run test:e2e    # Playwright e2e — auto-starts both the backend (uv run) and the dev
+                     # server if they aren't already running; reuses them if they are
 ```
 
 Backend, from `backend/`:
 
 ```powershell
 .venv\Scripts\Activate.ps1
-pytest tests/ multi_agent/chains/tests/ -m "not integration"
+python -m pytest tests/ multi_agent/chains/tests/ -m "not integration"
 ```
+
+Use `python -m pytest`, not the bare `pytest` command — the bare console-script doesn't add
+`backend/` to `sys.path` in this setup, so first-party imports (`multi_agent.*`, `api.*`, ...)
+fail to resolve during test collection.
 
 ## 6. Or: run the whole stack in Docker (one command)
 
@@ -125,5 +132,9 @@ Chroma vector store persists across rebuilds (bind-mounted, not baked into the i
   does *not* block startup (it's only used lazily, per-request).
 - **`ModuleNotFoundError` running the backend**: the venv isn't activated, or dependencies
   aren't installed — run `uv sync --extra dev --extra prod --extra eval` from `backend/`.
-- **Playwright e2e tests time out**: make sure the backend (step 2) is already running — 
-  `playwright.config.ts` only auto-starts the Next.js dev server, not the Python backend.
+- **`ModuleNotFoundError` running backend tests**: use `python -m pytest`, not bare `pytest` —
+  see step 5 above.
+- **Playwright e2e tests time out**: `playwright.config.ts` auto-starts both the backend and
+  the frontend dev server, so this usually means one of them failed to boot within its 30s
+  window (e.g. `backend/.env` missing/invalid) rather than something not being started manually
+  — check the Playwright output for which of the two `webServer` entries failed.
