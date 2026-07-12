@@ -2,7 +2,7 @@
 
 Scope: a deliberately minimal GitHub Actions workflow, two jobs — backend (`ruff` + the fast unit test tier) and frontend (`eslint` + Vitest unit tests + `next build`) — on every push/PR to `main`. No Playwright e2e (needs a live backend + real API keys — out of scope for a no-secrets CI job, see Gotchas), no build-and-push image, no deploy — those are Phases 18/19. Full design/rationale lives in `plan.md`'s Phase 17 section — this doc is the execution checklist plus the operational detail (workflow YAML, gotchas) the plan intentionally left out.
 
-Status: **built** — `.github/workflows/ci.yml` exists with both jobs, verified green locally (backend: `ruff check .` clean, 65/65 fast-tier tests pass in ~5s with no services running; frontend: `eslint` clean, 32/32 Vitest tests pass, `next build` succeeds) before ever pushing. Sequenced after both AWS deploy targets (Phase 15 Lambda, Phase 16 ECS) — see `plan.md`'s 2026-07-07 renumbering decision. Companion to [`cd-lambda-deploy-steps.md`](./cd-lambda-deploy-steps.md) and [`cd-ecs-deploy-steps.md`](./cd-ecs-deploy-steps.md), which both trigger after this workflow goes green.
+Status: **built** — `.github/workflows/ci.yml` exists with both jobs, verified green locally (backend: `ruff check .` clean, 65/65 fast-tier tests pass in ~5s with no services running; frontend: `eslint` clean, 32/32 Vitest tests pass, `next build` succeeds) before ever pushing. Sequenced after both AWS deploy targets (Phase 15 Lambda, Phase 16 ECS) — see `plan.md`'s 2026-07-07 renumbering decision. Companion to [`cd-dispatcher-steps.md`](./cd-dispatcher-steps.md) (design added 2026-07-11) — as of that same day, `cd.yml` is `workflow_dispatch`-only (dev-phase decision, no automatic trigger off this workflow yet; that's deferred, see the dispatcher doc's "Deferred" section), so today this workflow has **no** downstream automatic effect at all. This workflow itself is unchanged either way — still a plain `push`/`pull_request` trigger with no awareness of what (if anything) runs after it. **See "Known Follow-Up" below** for one small, not-yet-applied change this file will need if/when the automatic trigger is added back and Phase 21 (EKS) exists.
 
 ---
 
@@ -158,6 +158,17 @@ jobs:
       - name: Build
         run: npm run build
 ```
+
+---
+
+## Known Follow-Up (not yet applied)
+
+**This section describes a possible future change to the already-built `ci.yml`, not something this phase's original build missed** — flagging it now so it isn't lost, since the need for it only became clear when the Phase 18/19/21 dispatcher design (`cd-dispatcher-steps.md`) was added on 2026-07-11, well after this phase shipped. **This is conditional on two things both being true when Phase 21 is actually built**, so check `cd-dispatcher-steps.md`'s current state before assuming it applies:
+
+1. [Phase 21 (`cd-eks.yml`)](./ci-cd-eks-steps.md) exists, **and**
+2. `cd.yml` has an automatic `workflow_run`-off-`ci.yml` trigger — which, as of this writing, it deliberately does **not**: `cd.yml` is `workflow_dispatch`-only for the dev phase (see `cd-dispatcher-steps.md`'s "Why manual-only" and "Deferred" sections). If `cd.yml` is still manual-only when Phase 21 is built, this follow-up does not apply yet — a bot commit re-triggering `ci.yml` is harmless when nothing downstream fires automatically from `ci.yml` succeeding.
+
+If both conditions hold: `ci.yml` needs `paths-ignore: ['gitops/multi-agent/**']` added to its `push` trigger. Reasoning: under the dispatcher design, `cd-lambda.yml`/`cd-ecs.yml`/`cd-eks.yml` are all `workflow_call`-only — the *only* thing that can trigger any of them is `cd.yml`. If `cd.yml` is `workflow_run`-triggered off `ci.yml`, that makes `ci.yml`'s `push` trigger the **sole entry point** for the entire CD chain, not just for CI. Phase 21's bot commit (patching `gitops/multi-agent/values.yaml`) pushes to `main` just like any other commit — without the filter, that push re-triggers `ci.yml`, which re-triggers `cd.yml`, which redeploys *every* configured target (Lambda, ECS, and EKS again) in response to a commit that only ever needed to update one YAML field. Before the dispatcher design, this loop-prevention filter lived directly on `cd-eks.yml`'s own (now-removed) `push` trigger — see `ci-cd-eks-steps.md`'s Gotchas for the full before/after. Do not add this filter to `ci.yml` before both conditions hold; there's nothing yet that would push to `gitops/multi-agent/**`, and an unused path filter is just a place for the actual glob to drift from reality.
 
 ---
 

@@ -13,3 +13,15 @@ resource "aws_ssm_parameter" "secrets" {
   type  = "SecureString"
   value = var.secrets[each.value]
 }
+
+# Not a secret, unlike the block above — the CD dispatcher's smoke-check step
+# (cd-lambda-deploy-steps.md) reads this via `aws ssm get-parameter`, since a
+# GitHub Actions runner has no access to this stack's Terraform state and the
+# domain can't be a static GitHub Variable (no custom domain this phase, so
+# the auto-generated hostname changes on every destroy/reapply). See
+# enterprize-deploy-steps.md's "Follow-Up (2026-07-11)" section.
+resource "aws_ssm_parameter" "cloudfront_domain" {
+  name  = "/${var.project_name}/${var.environment}/cloudfront_domain"
+  type  = "String"
+  value = aws_cloudfront_distribution.this.domain_name
+}

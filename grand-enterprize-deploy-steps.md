@@ -184,3 +184,46 @@ Everything above this section was written before implementation and is kept as-i
 - **Two Phase-15-documented LocalStack gaps recurred identically here**, confirming they're systemic to LocalStack's CloudFront emulation, not one-offs: the CloudFront Function extensionless-URL rewrite still doesn't execute at request time under LocalStack (worked around with `.html` paths in ad-hoc testing, not "fixed" since Terraform itself is correct); the Git-Bash/MSYS env-var path-mangling bug recurred rebuilding the frontend, same `MSYS_NO_PATHCONV=1` fix.
 
 **Verified for real** (full detail in `completed.md`'s Phase 16 entry): `terraform apply` — 43 resources; ECS service `running=1`, ALB target `healthy`; a full `/v1/*` flow through CloudFront → ALB → the Fargate task (register → login → create session → a real chat/SSE stream, real CRAG graph run, real OpenAI answer, 26s, persisted to real Supabase Postgres); frontend built and synced, served correctly through CloudFront; a real Playwright browser E2E test (`chat.spec.ts`, via a throwaway copy + ad-hoc config, not the tracked suite) passed in 23.2s against the live CloudFront URL; the user separately confirmed the same URL working in a real desktop browser. **Not done**: Stage C (real AWS), the autoscaling load-test verification (step 17), the ALB-health-check-failure test (step 16), and `terraform destroy` (the 43 resources are still live on LocalStack as of this writing).
+
+---
+
+## Follow-Up (added 2026-07-11; applied and verified 2026-07-12, see the dated section below): CloudFront domain → SSM, for the CD dispatcher
+
+Everything above predates the Phase 18/19/21 CD dispatcher design (`cd-dispatcher-steps.md`) and is left as-is, matching this section's own stated convention of recording divergences rather than silently editing completed sections in place. This is a new, small, additive infra change, not part of the 43 resources verified above — not yet applied to the still-live LocalStack environment or (not started) Stage C real AWS.
+
+**Why:** `cd-ecs.yml` (Phase 19, see `cd-ecs-deploy-steps.md`) needs this stack's own CloudFront domain at deploy time for its post-deploy smoke check. Same reasoning as Phase 15's identical follow-up (see `enterprize-deploy-steps.md`'s own "Follow-Up" section) — no Terraform state access from a GitHub Actions runner, no custom domain in this phase either, so the auto-generated hostname changes on every destroy/reapply and can't be a static GitHub Variable. **This is a genuinely separate parameter from Phase 15's**, not a shared one — this stack's CloudFront distribution is independent of `infra/lambda-gate/`'s (Deviation 1 above), so it has its own domain and needs its own SSM entry, at this stack's own `/crag/prod-ecs` prefix, not `/crag/prod`.
+
+**Add to `infra/fargate/ssm.tf`** (new resource, alongside the existing `secrets` `for_each` block):
+
+```hcl
+# Not a secret, unlike the block above — the CD dispatcher's smoke-check step
+# (cd-ecs-deploy-steps.md) reads this via `aws ssm get-parameter`, since a
+# GitHub Actions runner has no access to this stack's Terraform state and the
+# domain can't be a static GitHub Variable (no custom domain this phase, so
+# the auto-generated hostname changes on every destroy/reapply). This
+# stack's own parameter, not a read of infra/lambda-gate/'s — same
+# independence rationale as the secrets block above.
+resource "aws_ssm_parameter" "cloudfront_domain" {
+  name  = "${local.ssm_prefix}/cloudfront_domain"
+  type  = "String"
+  value = aws_cloudfront_distribution.this.domain_name
+}
+```
+
+`type = "String"`, not `SecureString` — not sensitive, same reasoning as Phase 15's version. Resolves to `/crag/prod-ecs/cloudfront_domain` (`local.ssm_prefix`, `network.tf`), matching what `cd-ecs-deploy-steps.md`'s step 1 already grants `cd-ecs-deploy-role` read access to — the writer lives in this stack's Terraform, the reader's IAM grant lives in Phase 19's.
+
+**When to apply:** before Phase 19 is built, same reasoning as Phase 15's version — purely additive, picked up by whatever `terraform apply` happens at that point, no need to apply in isolation. Not required against the currently-live LocalStack environment specifically, since GitHub Actions CD workflows target real AWS only (see `cd-dispatcher-steps.md`) — this parameter only needs to exist for real once Stage C happens.
+
+---
+
+## Verified (2026-07-12): Follow-Up applied and tested against a fresh LocalStack instance
+
+The Follow-Up above was written 2026-07-11 as design-only, explicitly not yet applied. It has since been applied and tested for real, alongside a full independence re-verification against `infra/lambda-gate/` (own equivalent note in `enterprize-deploy-steps.md`). Full detail lives in `completed.md`'s Phase 16 entry — summarized here:
+
+- The prior LocalStack environment (still-live 43 resources per the "Verified for real" note above) was gone — LocalStack's container had been restarted since, persistence disabled, same recurring gap Phase 15/16 sessions keep hitting. Recovered via `infra/bootstrap` re-apply + `terraform init -reconfigure` + full re-apply for both `infra/lambda-gate/` and `infra/fargate/` in the same pass, specifically to re-test independence, not just to restore a working state.
+- `aws_ssm_parameter.cloudfront_domain` applied cleanly alongside the other 42 resources (43 total, `0 changed`/`0 destroyed`). Resolved to `/crag/prod-ecs/cloudfront_domain`, confirmed via `aws ssm get-parameter` and confirmed distinct from `infra/lambda-gate/`'s own `/crag/prod/cloudfront_domain` — `aws ssm get-parameters-by-path` against both prefixes returned 10 non-overlapping parameters each, no collision.
+- Full app flow re-verified through this stack's own CloudFront domain: register → login → create session → a real chat message (CRAG graph run, real OpenAI answer, persisted to Supabase Postgres) — succeeded end-to-end in 18.5s, entirely through CloudFront with no timeout, unlike `infra/lambda-gate/`'s equivalent call this same session (see that doc's own dated Verified section) — consistent with this stack's plain ALB origin having no analogue to LocalStack's ~30s CloudFront-to-Lambda-Function-URL proxy ceiling.
+- The frontend S3 bucket was found empty this session (the static export was never synced in this particular verification pass) — rebuilt with `MSYS_NO_PATHCONV=1 NEXT_OUTPUT_MODE=export NEXT_PUBLIC_API_BASE_URL=/v1 npm run build` and re-synced via `sync_frontend.sh`; `/login.html` confirmed 200 afterward. The CloudFront-Function extensionless-URL-rewrite gap recurred identically — same `.html`-suffix workaround used.
+- A test user created for this pass (`crag-verify-fargate-20260712@example.com`) was deleted afterward directly from Postgres (`DELETE FROM users WHERE email = ...`, cascading to its session/messages via the existing `ON DELETE CASCADE` FKs) — verified empty post-delete, confirmed no effect on the ~70 pre-existing users left over from earlier verification sessions.
+
+Net effect: the design in the Follow-Up section above is now closed, not just planned — `cd-ecs.yml` (Phase 19, once built) has a real, tested SSM parameter to read.

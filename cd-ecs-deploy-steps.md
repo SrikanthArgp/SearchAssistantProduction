@@ -1,8 +1,8 @@
 # Phase 19 — CD: ECS Fargate (GitHub Actions): Step-by-Step
 
-Scope: on every push to `main` that passes [Phase 17's CI](./ci-pipeline-steps.md), build the non-adapter image, push it to ECR, register a new ECS task definition revision, and roll the ECS service over to it — either via `update-service --force-new-deployment` or a full `terraform apply` when infra changed. Same GitHub-Actions-via-OIDC shape as [Phase 18](./cd-lambda-deploy-steps.md), reusing its deploy role with ECS-specific permissions added. Full design/rationale lives in `plan.md`'s Phase 19 section — this doc is the execution checklist plus the operational detail the plan intentionally left out.
+Scope: invoked by [the `cd.yml` dispatcher](./cd-dispatcher-steps.md) when a manual run explicitly selects `target: fargate`/`both` — `cd.yml` is `workflow_dispatch`-only for now (dev-phase decision, see `cd-dispatcher-steps.md`), there's no automatic trigger yet. Builds the non-adapter image, pushes it to ECR, registers a new ECS task definition revision, and rolls the ECS service over to it — either via `update-service --force-new-deployment` or a full `terraform apply` when infra changed. Same GitHub-Actions-via-OIDC shape as [Phase 18](./cd-lambda-deploy-steps.md), but with its **own independent deploy role**, not Phase 18's — see below. Full design/rationale lives in `plan.md`'s Phase 19 section — this doc is the execution checklist plus the operational detail the plan intentionally left out.
 
-Status: planning only, nothing built yet. **Hard prerequisite: Phase 16 (ECS Fargate) must already be applied at least once.** Also assumes [Phase 17's CI](./ci-pipeline-steps.md) and [Phase 18's Lambda CD](./cd-lambda-deploy-steps.md) exist — this doc reuses the OIDC provider and (optionally) the deploy role Phase 18 sets up, rather than duplicating them.
+Status: planning only, nothing built yet. **Hard prerequisites: Phase 16 (ECS Fargate) must already be applied at least once**, and [the `cd.yml` dispatcher](./cd-dispatcher-steps.md) must already exist — this workflow has no `push` trigger of its own, it's a `workflow_call` reusable workflow with nothing to invoke it otherwise. Also assumes [Phase 17's CI](./ci-pipeline-steps.md) and [Phase 18's Lambda CD](./cd-lambda-deploy-steps.md) exist — this doc reuses the shared GitHub OIDC *provider* Phase 18 registers, but **provisions its own separate deploy role**, not Phase 18's (this is a change from this doc's original scope — see step 1 below).
 
 ---
 
@@ -10,10 +10,11 @@ Status: planning only, nothing built yet. **Hard prerequisite: Phase 16 (ECS Far
 
 ```mermaid
 flowchart LR
-    CIPass(["Phase 17 CI: green\non push to main"]) --> Trigger["cd-ecs.yml triggers\non: push to main"]
-    Trigger --> OIDC["Assume IAM role via\nGitHub OIDC\n(shared role + ECS perms)"]
-    OIDC --> Build["docker build\n(non-adapter image,\nplain uvicorn CMD)"]
-    Build --> Push["Push to ECR\ntag: git-sha"]
+    Manual["workflow_dispatch\n(manual run — cd.yml, dev phase)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: fargate or both"| Trigger["cd-ecs.yml invoked\n(workflow_call, sha input)"]
+    Trigger --> OIDC["Assume cd-ecs-deploy-role via\nGitHub OIDC\n(own role, own ECS perms —\nindependent of Phase 18's role)"]
+    OIDC --> Build["docker build\n(non-adapter image,\nplain uvicorn CMD)\nchecked out at inputs.sha"]
+    Build --> Push["Push to ECR\ntag: ecs-sha"]
     Push --> Register["Register new ECS task\ndefinition revision\nimage = repo:sha"]
     Register --> PathCheck{"Diff touches\ninfra/** ?"}
     PathCheck -->|no| FastPath["aws ecs update-service\n--task-definition new-rev\n--force-new-deployment"]
@@ -39,20 +40,23 @@ flowchart LR
 
 - Phase 16 (ECS Fargate) applied at least once.
 - Phase 17's CI workflow in place.
-- Phase 18's GitHub OIDC provider already registered in AWS (reused, not recreated) — if Phase 18 hasn't been built yet, do step 1 below once, shared by both.
+- [The `cd.yml` dispatcher](./cd-dispatcher-steps.md) already exists — this workflow is `workflow_call`-only, it has no `push` trigger of its own to fall back on.
+- Phase 18's GitHub OIDC *provider* already registered in AWS (reused, not recreated) — if Phase 18 hasn't been built yet, do step 1 below once, shared by both. **The deploy role is not shared** — this phase provisions its own.
+- `AWS_ACCOUNT_ID`, `AWS_REGION` set as **GitHub Actions repository Variables** — see [`cd-dispatcher-steps.md`'s "GitHub Repository Configuration"](./cd-dispatcher-steps.md#github-repository-configuration-variables-not-secrets); already set up if Phase 18 was built first. **This phase's CloudFront domain is its own, separate from Phase 18's** — Phase 16 provisions an independent CloudFront distribution, not a shared one, so this uses its own SSM parameter (`/crag/prod-ecs/cloudfront_domain`, not Phase 15's `/crag/prod/cloudfront_domain`) — see the same dispatcher section.
+- Phase 16's Terraform writes its distribution's domain to `/crag/prod-ecs/cloudfront_domain` via `aws_ssm_parameter`, matching Phase 16's own `/crag/prod-ecs/*` namespace already used for other parameters — confirm this parameter exists before relying on step 8's smoke check.
 
 ---
 
 ## Steps
 
-1. **Reuse Phase 18's OIDC deploy role**, adding ECS-specific permissions rather than provisioning a second role: `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`, and `iam:PassRole` scoped to *both* Phase 16's task execution role and task role (Terraform/the AWS CLI re-asserts both on every `RegisterTaskDefinition` call, even unchanged). If scoping later pushes toward separating Lambda and ECS deploy permissions onto distinct roles, that's a valid refinement — not resolved here, matching the same open call left in `plan.md`.
+1. **Provision a separate deploy role, `cd-ecs-deploy-role`** — independently bootstrapped from Phase 18's `cd-lambda-deploy-role`, not a reuse of it. **This is a change from this doc's original scope**, which called for reusing Phase 18's role with ECS permissions added; `plan.md`'s Phase 18/19 design note (2026-07-11) resolved that previously-open call in favor of splitting them, so that each target's deploy access stays independently revocable (see this doc's last Gotcha, now resolved rather than open). Trust policy same shape as Phase 18's (`repo:<owner>/<repo>:ref:refs/heads/main`), permissions scoped to `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`, ECR push, `ssm:GetParameter` on `/crag/prod-ecs/cloudfront_domain` specifically (for step 8's smoke check), and `iam:PassRole` scoped to *both* Phase 16's task execution role and task role (Terraform/the AWS CLI re-asserts both on every `RegisterTaskDefinition` call, even unchanged) — and, notably, **no** `lambda:*` permissions at all, unlike a shared role would have needed.
 2. **Enable the ECS deployment circuit breaker** on the Phase 16 service (Terraform: `deployment_circuit_breaker { enable = true, rollback = true }` inside `aws_ecs_service`) — a one-time infra change, not part of this workflow's runtime steps, but a hard prerequisite for the "auto-rollback" half of the architecture diagram above to actually exist.
-3. **Create `.github/workflows/cd-ecs.yml`** (see below), same trigger/permissions shape as Phase 18.
-4. **Build and tag** the non-adapter image (`CMD ["python", "run_api.py"]`, no Lambda Web Adapter layer — the build target decided in Phase 16 Stage A step 1) with the commit SHA, push to ECR under the `:ecs`-prefixed tag convention Phase 16 already established (e.g. `<repo>:ecs-<sha>`).
+3. **Create `.github/workflows/cd-ecs.yml`** (see below) as a `workflow_call` reusable workflow — `on: workflow_call` with a required `sha` input, **no `on: push` block**, same `permissions: { id-token: write, contents: read }` shape as Phase 18.
+4. **Build and tag** the non-adapter image (`CMD ["python", "run_api.py"]`, no Lambda Web Adapter layer — the build target decided in Phase 16 Stage A step 1) with `inputs.sha` — **not `github.sha`** (see the dispatcher doc's sha-propagation note) — push to ECR under the `:ecs`-prefixed tag convention Phase 16 already established (e.g. `<repo>:ecs-<sha>`).
 5. **Register a new task definition revision**: fetch the current task definition as a template (`aws ecs describe-task-definition`), replace only the container's `image` field, re-register via `aws ecs register-task-definition` — do not hand-author the full task definition JSON inline in the workflow, since that risks silently dropping fields (log configuration, secrets list) that Terraform originally set.
 6. **Deploy**: fast path calls `aws ecs update-service --cluster <cluster> --service <service> --task-definition <new-revision-arn> --force-new-deployment`; slow path runs `terraform apply` with the new image tag as a variable, same infra-diff detection as Phase 18.
 7. **Wait for stability**: `aws ecs wait services-stable` — see Gotchas for what "stable" actually means and how this can hang.
-8. **Smoke check**: `curl -sf https://<cloudfront-domain>/health`, same as Phase 18.
+8. **Smoke check**: fetch the current CloudFront domain from `/crag/prod-ecs/cloudfront_domain` via `aws ssm get-parameter` (this phase's own SSM namespace, not Phase 18's — see Prerequisites), then `curl -sf https://<fetched-domain>/health`, same pattern as Phase 18.
 9. **No explicit workflow-level rollback step needed** if the circuit breaker (step 2) is enabled — ECS handles it natively. If it's *not* enabled, add one mirroring Phase 18's: re-register the previous revision and call `update-service` again.
 
 ---
@@ -64,18 +68,24 @@ flowchart LR
 name: CD - ECS Fargate
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit SHA to build and deploy, resolved by cd.yml (see cd-dispatcher-steps.md)"
+        required: true
+        type: string
 
 # Same reasoning as Phase 18: never cancel a run mid-deploy. A canceled
 # register-task-definition/update-service pair can leave the service pointed
-# at a task definition revision that was never fully rolled out.
+# at a task definition revision that was never fully rolled out. Scoped to
+# inputs.sha, not github.ref, since this workflow no longer has its own
+# push-triggered ref.
 concurrency:
-  group: cd-ecs-${{ github.ref }}
+  group: cd-ecs-${{ inputs.sha }}
   cancel-in-progress: false
 
 permissions:
-  id-token: write
+  id-token: write   # also required on the *caller* job in cd.yml, see its Gotchas
   contents: read
 
 env:
@@ -93,6 +103,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.sha }}   # NOT the implicit default — see cd-dispatcher-steps.md's sha-propagation note
           fetch-depth: 2
 
       - name: Detect infra changes
@@ -106,8 +117,8 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<account-id>:role/github-actions-cd
-          aws-region: <region>
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/cd-ecs-deploy-role
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to ECR
         id: ecr-login
@@ -116,7 +127,7 @@ jobs:
       - name: Build and push non-adapter image
         env:
           ECR_REPO: ${{ steps.ecr-login.outputs.registry }}/crag-backend
-          IMAGE_TAG: ecs-${{ github.sha }}
+          IMAGE_TAG: ecs-${{ inputs.sha }}
         run: |
           docker build -t "$ECR_REPO:$IMAGE_TAG" -f Dockerfile.ecs .
           docker push "$ECR_REPO:$IMAGE_TAG"
@@ -126,7 +137,7 @@ jobs:
         id: register
         env:
           ECR_REPO: ${{ steps.ecr-login.outputs.registry }}/crag-backend
-          IMAGE_TAG: ecs-${{ github.sha }}
+          IMAGE_TAG: ecs-${{ inputs.sha }}
         run: |
           aws ecs describe-task-definition \
             --task-definition "$ECS_SERVICE" \
@@ -157,7 +168,7 @@ jobs:
         if: steps.changes.outputs.infra == 'true'
         working-directory: backend/infra
         env:
-          TF_VAR_image_tag: ecs-${{ github.sha }}
+          TF_VAR_image_tag: ecs-${{ inputs.sha }}
         run: |
           terraform init
           terraform apply -auto-approve
@@ -167,14 +178,25 @@ jobs:
         run: |
           aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
 
+      - name: Look up current CloudFront domain
+        # This phase's own SSM parameter, not Phase 18's — Phase 16's
+        # CloudFront distribution is independent of Phase 15's. See
+        # cd-dispatcher-steps.md's "GitHub Repository Configuration" section.
+        id: domain
+        run: |
+          DOMAIN=$(aws ssm get-parameter --name /crag/prod-ecs/cloudfront_domain --query 'Parameter.Value' --output text)
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
       - name: Smoke check
         run: |
-          curl -sf --retry 5 --retry-delay 3 https://<cloudfront-domain>/health
+          curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
 ```
 
 ---
 
 ## Gotchas
+
+- **This workflow can no longer be triggered or tested on its own.** As a `workflow_call`-only file, `cd-ecs.yml` has no `push`/`workflow_dispatch` trigger of its own — testing it means testing [`cd.yml`](./cd-dispatcher-steps.md) with `target: fargate`, not this file in isolation.
 
 - **`aws ecs wait services-stable` can hang for the full default timeout (or the `timeout-minutes` set above) if the new task never becomes healthy.** "Stable" means the running count matches the desired count *and* the ALB target group reports the task(s) healthy — a container that starts but fails its `/health` check keeps the deployment "in progress" indefinitely from the CLI's point of view. Always set an explicit `timeout-minutes` on this step (as above) rather than trusting the default, so a stuck deploy fails the workflow instead of burning the job's entire time budget.
 
@@ -188,4 +210,4 @@ jobs:
 
 - **The circuit breaker's automatic rollback and this workflow's smoke check can disagree about what "success" means.** ECS's circuit breaker judges health purely by task/ALB health checks; the smoke check here hits `/health` through the *full* CloudFront → ALB → task path, which can fail for reasons the circuit breaker never sees (a CloudFront cache/origin misconfiguration, a DNS propagation delay). A deploy can pass ECS's own health checks (no circuit-breaker rollback) while still failing this workflow's smoke check — that's a real signal, not a flaky test, and shouldn't be treated as "ECS said it was fine, ignore the smoke check."
 
-- **Reusing Phase 18's OIDC role vs. giving this workflow its own is a real scoping decision, not just convenience.** A shared role's permissions are the union of what Lambda and ECS deploys need — meaning a compromised Phase 19 workflow run could also touch Lambda, and vice versa. This doc follows `plan.md`'s stated default (reuse, add ECS permissions) for less IAM surface to maintain, but if the two deploy targets ever need to be independently revocable (e.g. only Phase 19's deploy access needs to be pulled during an incident), split them — decide before step 1, not after an incident makes the answer obvious in hindsight.
+- **Resolved (2026-07-11): this workflow uses its own OIDC role, not Phase 18's.** Earlier drafts of this doc followed `plan.md`'s original stated default (reuse Phase 18's role, add ECS permissions) — a shared role's permissions would be the union of what Lambda and ECS deploys need, meaning a compromised Phase 19 workflow run could also touch Lambda, and vice versa. `plan.md`'s Phase 18/19 design note now resolves this in favor of splitting them: `cd-ecs-deploy-role` is bootstrapped independently, has no `lambda:*` permissions, and is independently revocable if only one target's deploy access needs to be pulled during an incident. If reviewing an older copy of this doc or a stale mental model of the design, this is the one place it's most likely to be out of date.
