@@ -198,6 +198,38 @@ jobs:
         run: |
           curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend (static export)
+        # See cd-lambda.yml's identical step for the full explanation — matches
+        # infra/fargate/scripts/sync_frontend.sh's own build command exactly.
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT_MODE: export
+          NEXT_PUBLIC_API_BASE_URL: /v1
+        run: npm run build
+
+      - name: Sync frontend to S3
+        # Real gap found building this step — see cd-lambda.yml's identical step for the full
+        # explanation. Bucket name matches infra/fargate/outputs.tf's frontend_bucket_name.
+        run: |
+          aws s3 sync frontend/out s3://crag-prod-ecs-frontend --delete
+
+      - name: Invalidate CloudFront static-asset cache
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='crag-prod-ecs'].Id" --output text)
+          aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths '/*'
+
       # No explicit rollback step here, unlike cd-lambda.yml — infra/fargate/ecs.tf's
       # deployment_circuit_breaker (enable = true, rollback = true) handles it natively at the
       # ECS-service level, reverting to the last known-good task definition revision if the new

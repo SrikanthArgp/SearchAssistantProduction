@@ -222,6 +222,49 @@ jobs:
         run: |
           curl -sf --retry 5 --retry-delay 3 "https://${{ steps.domain.outputs.domain }}/health"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend (static export)
+        # NEXT_OUTPUT_MODE=export switches next.config.ts's output to "export" (frontend/out/).
+        # NEXT_PUBLIC_API_BASE_URL=/v1 is a same-origin relative path, not an absolute
+        # localhost:8000 URL, so the built JS calls whatever host actually serves the page —
+        # letting CloudFront's own /v1/* path routing (cloudfront.tf) do the rest. Matches
+        # infra/lambda-gate/scripts/sync_frontend.sh's own build command exactly.
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT_MODE: export
+          NEXT_PUBLIC_API_BASE_URL: /v1
+        run: npm run build
+
+      - name: Sync frontend to S3
+        # Real gap found building this step: frontend deploy was entirely absent from Phase
+        # 18/19's original design (see cd-lambda-deploy-steps.md/cd-ecs-deploy-steps.md — neither
+        # mentions S3 or the frontend at all), even though Phase 15/16 provision a frontend
+        # bucket and a static-asset CloudFront behavior. sync_frontend.sh was the only way to
+        # populate it, and only ever run by hand. Bucket name matches
+        # infra/lambda-gate/outputs.tf's frontend_bucket_name, hardcoded here rather than read
+        # via `terraform output` to avoid a second terraform init in this job.
+        run: |
+          aws s3 sync frontend/out s3://crag-prod-frontend --delete
+
+      - name: Invalidate CloudFront static-asset cache
+        # aws_cloudfront_cache_policy.static_assets (cloudfront.tf) has a real non-zero TTL,
+        # unlike the no_cache policy the /v1/* and /health behaviors use — without this, a
+        # frontend deploy can leave stale HTML/JS live behind CloudFront's edge cache.
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='crag-prod'].Id" --output text)
+          aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths '/*'
+
       - name: Rollback on failed smoke check
         # Fast-path only — see the "Record previous image digests" step's comment. The slow path
         # has no saved digest to roll back to here; a broken infra-changed deploy is corrected by
