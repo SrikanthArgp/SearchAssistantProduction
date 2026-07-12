@@ -47,6 +47,15 @@ permissions:
 jobs:
   deploy:
     runs-on: ${{ inputs.environment == 'localstack' && 'self-hosted' || 'ubuntu-latest' }}
+    # ubuntu-latest already defaults run: steps to bash; the self-hosted runner is Windows and
+    # defaults to pwsh, which can't parse this file's bash-syntax `run:` blocks (found by
+    # actually dispatching against it — pwsh's ParserError on `if [ ... ]; then` looks nothing
+    # like a shell-not-found error, easy to misdiagnose as something else). Git for Windows
+    # (already required on this machine for the runner's own checkout step) ships bash.exe, so
+    # this works unmodified in both environments.
+    defaults:
+      run:
+        shell: bash
     env:
       FUNCTION_NAME: crag-prod-backend
       STREAM_FUNCTION_NAME: crag-prod-backend-stream
