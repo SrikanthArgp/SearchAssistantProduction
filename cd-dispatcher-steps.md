@@ -159,3 +159,70 @@ Not built now — this section exists so the design work already done for the au
 - **Re-add a `guard` job**, because `workflow_run`-triggered runs have no `inputs` context at all — `inputs.target` doesn't exist on that trigger type, so `deploy-lambda`/`deploy-ecs`'s `if:` conditions can't reference it directly once a second trigger type exists. The guard job resolves `target` (`inputs.target` on manual runs, a hardcoded default like `both` on `workflow_run` runs) and `sha` into uniform outputs every downstream job reads, and gates on `github.event.workflow_run.conclusion == 'success'` — a `workflow_run` event fires on **every** conclusion, not just success, so without this check a failing CI run would still trigger a deploy.
 - **`sha` propagation stops being optional at that point.** For a `workflow_run`-triggered run, `github.sha` does *not* reliably equal the commit CI actually validated — `actions/checkout@v4`'s default behavior in a `workflow_run`-triggered workflow checks out the **default branch's current HEAD** at run time, not the commit that triggered `ci.yml`. If another commit lands on `main` between CI finishing and the dispatcher starting (a real race under back-to-back merges), a plain checkout with no `ref:` would silently build and deploy a commit CI never validated. The fix: read `github.event.workflow_run.head_sha` in the guard job and pass it down as the `sha` input, with every deploy job's checkout step using `ref: ${{ inputs.sha }}` — this is what Phase 18/19's `cd-lambda.yml`/`cd-ecs.yml` already do today (they take a `sha` input and check it out explicitly), specifically so this later change is a one-file edit to `cd.yml`, not a change to every deploy workflow.
 - **The bot-commit loop-prevention concern (Phase 21) only becomes real once this trigger exists.** Today, with `cd.yml` manual-only, a bot commit re-triggering `ci.yml` is harmless — nothing downstream fires automatically from `ci.yml` succeeding. Once `workflow_run` is added here, `ci.yml` becomes the sole push-triggered entry point for the whole CD chain again, and `ci.yml` needs `paths-ignore: ['gitops/multi-agent/**']` added at that point — not before. See `ci-pipeline-steps.md`'s "Known Follow-Up" section, which already flags this for whenever it becomes relevant.
+
+---
+
+## Deferred: Automating `infra/bootstrap` Into `cd.yml`
+
+Not built now — planning only (2026-07-12), following a real gap hit re-verifying Phase 18/19 end
+to end against a freshly reset LocalStack instance (see `completed.md`'s Phase 18/19
+LocalStack-verification entry). `infra/bootstrap` — the shared Terraform state S3 bucket +
+DynamoDB lock table that `infra/lambda-gate/` and `infra/fargate/` both point their backends at —
+has never been part of either CD workflow; it's always been a manual one-time `terraform apply`,
+run by hand from `github-workflow-trigger.md`'s runbook whenever LocalStack itself gets reset (not
+just the two deploy stacks). That manual step is the one piece of this pipeline that isn't
+self-contained, and it's worth closing — but it has one real design constraint that makes it more
+than a copy-paste of the existing pattern.
+
+**Where it would go:** a new `bootstrap` job in `cd.yml`, with both `deploy-lambda` and
+`deploy-ecs` depending on it via `needs: bootstrap` — one shared job gating both reusable-workflow
+calls, not bootstrap logic duplicated inside `cd-lambda.yml` *and* `cd-ecs.yml`. This also avoids
+two parallel `target: both` jobs racing to create the same bucket, since `deploy-lambda`/
+`deploy-ecs` currently run in parallel with no shared-state lock between them (see "Bootstrap
+independence" above) — a shared `needs:` gate keeps that property while still only bootstrapping
+once per dispatch.
+
+**The real constraint: `infra/bootstrap` has no remote backend — it can't have one, since it's the
+thing that creates the remote backend everything else points at.** It uses local Terraform state
+(`infra/bootstrap/terraform.tfstate`), which is gitignored. Every CD job's checkout step runs `git
+clean -ffdx` (confirmed in this session's own run logs — it's what caught `backend/multi_agent/
+.chroma/` before that directory was committed to git), which wipes gitignored files, so a
+bootstrap job's local state would never survive between CD runs. A plain `terraform apply` relying
+on that state isn't idempotent here — it would try to create the bucket every single dispatch and
+fail with "already exists" the second time, since neither the git-diff heuristic
+`cd-lambda.yml`/`cd-ecs.yml` use for the ECR-repo chicken-and-egg (gap 4/9, see `completed.md`) nor
+Terraform's own state can serve as the source of truth for something whose state can't persist.
+
+**Resolution: gate on an AWS CLI existence check, not on Terraform state or a path filter.**
+`aws s3api head-bucket --bucket crag-terraform-state` and `aws dynamodb describe-table --table-name
+crag-terraform-locks` — skip the `terraform apply` step if both already exist, run it if either is
+missing. This needs **zero platform branching of its own**: the same two AWS CLI calls work
+identically against LocalStack or real AWS, since they just follow whatever `AWS_ENDPOINT_URL`/
+credentials the job's existing credentials step already set. That's the one piece of this addition
+that's genuinely simpler than the ECR-repo fix it's modeled on.
+
+**Keeping the platform diff minimal (the actual ask that prompted this section):** the existing
+`cd-lambda.yml`/`cd-ecs.yml` pattern already achieves "flip `environment`, nothing else changes" —
+one input, a couple of small `if:`-gated steps (OIDC vs. dummy LocalStack creds), and Terraform
+itself never branches (only which `-backend-config=<file>.hcl` gets picked). A `bootstrap` job
+fits that same shape with even less new surface:
+- `infra/bootstrap/main.tf` already has a single `var.use_localstack` boolean driving
+  `skip_credentials_validation`, `s3_use_path_style`, and the LocalStack endpoint overrides — so
+  the job just needs `TF_VAR_use_localstack: ${{ inputs.environment == 'localstack' }}`. No new
+  `.tf` files, no new conditionals in the Terraform config itself.
+- Credentials: reuse the same two-step OIDC/LocalStack block already duplicated between
+  `cd-lambda.yml` and `cd-ecs.yml` — a third copy is consistent with the existing style. If the
+  duplication itself becomes annoying later (e.g. once a third environment exists), factoring it
+  into one composite action (`.github/actions/configure-aws/action.yml`) shared by all three jobs
+  is the next lever — not required to get bootstrap working, just the natural follow-up if "one
+  place to change" needs to extend past what's already minimal.
+- No backend-config file swap needed for the bootstrap job itself — unlike `lambda-gate`/`fargate`,
+  it has no remote backend to point at in the first place.
+
+**Deliberately scoped to `environment: localstack` only.** Automating a real AWS account's *first*
+state-bucket creation from CI raises its own unresolved chicken-and-egg — which credentials create
+that bucket, before any OIDC role or remote backend exists yet to assume against — and `var.secrets`
+for real AWS mode is already an open gap (`completed.md`'s Phase 18 entry). Bundling that unsolved
+problem into this change would be scope creep relative to what's actually blocking LocalStack
+testing today. Real AWS bootstrap stays a manual one-off, same as it is now, until Phase 15/16's
+Stage C is designed.
