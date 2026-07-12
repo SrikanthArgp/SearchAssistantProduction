@@ -120,15 +120,6 @@ jobs:
             | docker login --username AWS --password-stdin "$REGISTRY"
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Seed Chroma vector store (LocalStack dev-machine simplification)
-        # See cd-lambda.yml's identical step for the full explanation — multi_agent/.chroma/ is
-        # gitignored and absent from a fresh checkout, so the built image crashes the moment
-        # anything actually invokes the CRAG graph (this stack's /health check itself doesn't
-        # crash, since it only does SELECT 1 + Redis PING — but a real chat request still would,
-        # so this is added here too for consistency, not just to satisfy a smoke check).
-        if: inputs.environment == 'localstack'
-        run: cp -r "$LOCAL_CHROMA_SEED_PATH" backend/multi_agent/.chroma
-
       - name: Build and push image
         env:
           ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-prod-ecs-backend

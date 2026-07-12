@@ -149,20 +149,6 @@ jobs:
             | docker login --username AWS --password-stdin "$REGISTRY"
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
-      - name: Seed Chroma vector store (LocalStack dev-machine simplification)
-        # Real gap found running this workflow: multi_agent/.chroma/ is gitignored (CLAUDE.md —
-        # populated locally via a commented-out ingestion.py step, never part of CI), so a fresh
-        # checkout has no vector store at all, and the built image crashes on cold start
-        # (FileNotFoundError on /app/multi_agent/.chroma, confirmed via CloudWatch logs). How the
-        # real CD pipeline should provision this — bake ingestion into the image build, commit
-        # the DB, or a separate provisioning step — is an open design question, deliberately not
-        # decided here. For LocalStack testing on this self-hosted runner specifically, treating
-        # it as "already populated" by copying this same machine's own local dev store is an
-        # accepted simplification — this step does not exist, and could not exist, on a
-        # GitHub-hosted runner for the aws-mode path.
-        if: inputs.environment == 'localstack'
-        run: cp -r "$LOCAL_CHROMA_SEED_PATH" backend/multi_agent/.chroma
-
       - name: Build and push image
         env:
           ECR_REPO: ${{ steps.ecr.outputs.registry }}/crag-backend
