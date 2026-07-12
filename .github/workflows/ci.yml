@@ -5,8 +5,12 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
 
 # Cancel superseded runs on the same PR/branch instead of letting them queue.
 concurrency:
