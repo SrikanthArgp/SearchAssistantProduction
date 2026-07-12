@@ -84,6 +84,24 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
           echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
 
+      - name: Terraform init (infra changed)
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/fargate
+        run: |
+          BACKEND_CONFIG=backend-aws.hcl
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            BACKEND_CONFIG=backend-localstack.hcl
+          fi
+          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
+
+      - name: Ensure ECR repo exists (infra changed, first apply)
+        # Same chicken-and-egg as cd-lambda.yml — see that file's identical step for the full
+        # explanation. LocalStack's GetAuthorizationToken returns an empty list until a
+        # repository exists, so the ECR login below needs this to run first.
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/fargate
+        run: terraform apply -target=aws_ecr_repository.backend -auto-approve
+
       - name: Resolve ECR registry and log in
         id: ecr
         run: |
@@ -139,17 +157,13 @@ jobs:
             --force-new-deployment
 
       - name: Deploy - full apply (infra changed)
+        # terraform init already ran above (before the targeted ECR-repo apply) — this step just
+        # applies everything else now that the image it references actually exists in ECR.
         if: steps.changes.outputs.infra == 'true'
         working-directory: infra/fargate
         env:
           TF_VAR_backend_image_tag: ecs-${{ inputs.sha }}
-        run: |
-          BACKEND_CONFIG=backend-aws.hcl
-          if [ "${{ inputs.environment }}" = "localstack" ]; then
-            BACKEND_CONFIG=backend-localstack.hcl
-          fi
-          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
-          terraform apply -auto-approve
+        run: terraform apply -auto-approve
 
       - name: Wait for service stability
         timeout-minutes: 10

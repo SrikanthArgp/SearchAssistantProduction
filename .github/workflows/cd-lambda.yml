@@ -92,6 +92,30 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=test" >> "$GITHUB_ENV"
           echo "AWS_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
 
+      - name: Terraform init (infra changed)
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/lambda-gate
+        run: |
+          BACKEND_CONFIG=backend-aws.hcl
+          if [ "${{ inputs.environment }}" = "localstack" ]; then
+            BACKEND_CONFIG=backend-localstack.hcl
+          fi
+          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
+
+      - name: Ensure ECR repo exists (infra changed, first apply)
+        # Real chicken-and-egg, found by actually running this workflow against a from-scratch
+        # LocalStack instance: the ECR login step below needs a repository to already exist —
+        # LocalStack's GetAuthorizationToken returns an empty authorizationData list (crashing
+        # `aws ecr get-login-password` with "list index out of range") until at least one
+        # repository exists in the account/region, confirmed by reproducing it directly. A plain
+        # `terraform apply` can't run first either, since aws_lambda_function itself needs the
+        # image to already exist at apply time. Same two-pass shape completed.md's Phase 15/16
+        # entries already used manually (`-target=aws_ecr_repository.backend` first) — done here
+        # as part of the workflow itself instead of a local script.
+        if: steps.changes.outputs.infra == 'true'
+        working-directory: infra/lambda-gate
+        run: terraform apply -target=aws_ecr_repository.backend -auto-approve
+
       - name: Resolve ECR registry and log in
         # One shell step for both environments rather than aws-actions/amazon-ecr-login, which
         # only knows how to construct a real-AWS registry hostname. LocalStack's registry is a
@@ -145,17 +169,13 @@ jobs:
           aws lambda wait function-updated --function-name "$STREAM_FUNCTION_NAME"
 
       - name: Deploy - full apply (infra changed)
+        # terraform init already ran above (before the targeted ECR-repo apply) — this step just
+        # applies everything else now that the image it references actually exists in ECR.
         if: steps.changes.outputs.infra == 'true'
         working-directory: infra/lambda-gate
         env:
           TF_VAR_backend_image_tag: ${{ inputs.sha }}
-        run: |
-          BACKEND_CONFIG=backend-aws.hcl
-          if [ "${{ inputs.environment }}" = "localstack" ]; then
-            BACKEND_CONFIG=backend-localstack.hcl
-          fi
-          terraform init -backend-config="$BACKEND_CONFIG" -reconfigure
-          terraform apply -auto-approve
+        run: terraform apply -auto-approve
 
       - name: Look up current CloudFront domain
         # Not a GitHub Variable — this project has no custom domain, so the
