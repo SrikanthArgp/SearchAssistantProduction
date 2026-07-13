@@ -22,6 +22,12 @@
 # stack that didn't exist yet — `aws ecr get-login-password` / `docker push` failed with "The
 # repository with name 'crag-backend' does not exist". Same recovery as above: the next commit
 # needs to actually touch this directory.
+#
+# A third gap on the same first dispatch: this resource's own create succeeded (confirmed via
+# `aws ecr describe-repositories` directly), but the apply still failed on the post-create tag
+# read-back (ecr:ListTagsForResource, missing from the deploy role's IAM policy — fixed in
+# infra/bootstrap/github-oidc.tf). Confirmed aws_ecr_repository.backend was still recorded in
+# Terraform state despite that later failure, so no "already exists" conflict on retry.
 resource "aws_ecr_repository" "backend" {
   name                 = "${var.project_name}-backend"
   image_tag_mutability = "MUTABLE"
