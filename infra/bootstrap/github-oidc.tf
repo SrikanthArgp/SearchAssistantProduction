@@ -145,7 +145,13 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
         # Needed only on the full-apply (infra-changed) path — Terraform re-asserts
         # lambda_exec's role on every apply, even when the role itself is unchanged.
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
+        # iam:ListInstanceProfilesForRole: the AWS provider's role-delete path checks for
+        # attached instance profiles before deleting, unconditionally, even though a Lambda/ECS
+        # execution role would never have one — found because a previous partial apply left this
+        # role "tainted" (a create succeeded but a later read in the same apply errored,
+        # confirmed in the run log: "is tainted, so must be replaced"), forcing a destroy+recreate
+        # on this attempt.
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = "arn:aws:iam::*:role/crag-prod-lambda-exec"
       },
     ]
@@ -265,7 +271,13 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
       {
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
+        # iam:ListInstanceProfilesForRole: the AWS provider's role-delete path checks for
+        # attached instance profiles before deleting, unconditionally, even though a Lambda/ECS
+        # execution role would never have one — found because a previous partial apply left this
+        # role "tainted" (a create succeeded but a later read in the same apply errored,
+        # confirmed in the run log: "is tainted, so must be replaced"), forcing a destroy+recreate
+        # on this attempt.
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListInstanceProfilesForRole", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = ["arn:aws:iam::*:role/crag-prod-ecs-execution", "arn:aws:iam::*:role/crag-prod-ecs-task"]
       },
       {
