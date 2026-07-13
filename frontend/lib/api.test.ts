@@ -26,6 +26,9 @@ describe("apiFetch", () => {
 
     const [, init] = fetchMock.mock.calls[0];
     expect((init.headers as Headers).get("Authorization")).toBe("Bearer token-123");
+    // Also sent as X-Auth-Token - survives CloudFront OAC overwriting Authorization on the
+    // streaming Lambda's Function URL origin path. See api.ts's rawFetch comment.
+    expect((init.headers as Headers).get("X-Auth-Token")).toBe("token-123");
   });
 
   it("does not attach a token when auth is disabled", async () => {

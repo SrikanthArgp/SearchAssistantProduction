@@ -50,7 +50,17 @@ async function rawFetch(path: string, init: RequestInit, token: string | null): 
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+    // Also sent as a custom header: CloudFront's Origin Access Control overwrites Authorization
+    // with its own AWS SigV4 signature en route to the streaming Lambda's Function URL origin
+    // (AWS_IAM auth), so this app's own bearer token can't survive in that header on that path —
+    // only on this one. The buffered/API-Gateway path has no such conflict, but sending both
+    // headers unconditionally means this doesn't need to special-case by route. See
+    // backend/auth/dependencies.py's extract_bearer_token and infra/lambda-gate/cloudfront.tf's
+    // OAC comments for the full story.
+    headers.set("X-Auth-Token", token);
+  }
 
   try {
     return await fetch(`${API_BASE_URL}${path}`, { ...init, headers });

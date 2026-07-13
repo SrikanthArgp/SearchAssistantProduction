@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
 from jose import JWTError
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +19,7 @@ from api.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
-from auth.dependencies import bearer_scheme
+from auth.dependencies import bearer_scheme, extract_bearer_token
 from auth.jwt import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     create_access_token,
@@ -144,14 +144,21 @@ async def refresh(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     payload: LogoutRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ) -> None:
+    # Re-extract the same way get_current_user did (X-Auth-Token first, Authorization Bearer
+    # fallback) rather than trusting credentials.credentials directly — bearer_scheme is
+    # auto_error=False, so credentials can legitimately be None here (e.g. a request that only
+    # carried X-Auth-Token, the case on the streaming Lambda's OAC-signed path).
+    token = extract_bearer_token(request, credentials)
     try:
-        access_claims = decode_token(credentials.credentials)
-        await _revoke_in_cache(redis, access_claims["jti"], access_claims["exp"])
+        access_claims = decode_token(token) if token else None
+        if access_claims:
+            await _revoke_in_cache(redis, access_claims["jti"], access_claims["exp"])
     except JWTError:
         pass  # already validated by get_current_user; this can't realistically happen
 

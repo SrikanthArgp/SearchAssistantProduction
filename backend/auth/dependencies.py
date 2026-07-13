@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 
 import redis.asyncio as aioredis
 import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from redis.exceptions import RedisError
@@ -18,7 +18,7 @@ from db.models import User
 
 logger = logging.getLogger(__name__)
 
-bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -38,8 +38,27 @@ async def get_redis_client() -> aioredis.Redis:
     )
 
 
+def extract_bearer_token(
+    request: Request, credentials: HTTPAuthorizationCredentials | None
+) -> str | None:
+    # X-Auth-Token takes priority over the standard Authorization header. On the streaming
+    # Lambda's Function URL (behind CloudFront's Origin Access Control, AWS_IAM auth), CloudFront
+    # overwrites Authorization with its own AWS SigV4 signature before the request reaches this
+    # app — this app's own bearer token can't survive in that header on that path, only on this
+    # custom one (see infra/lambda-gate/cloudfront.tf's OAC comments). The buffered/API-Gateway
+    # path has no such conflict, but the frontend sends both headers everywhere so this same
+    # extraction works unconditionally, regardless of which origin actually served the request.
+    # bearer_scheme is auto_error=False (not the HTTPBearer default) specifically so credentials
+    # can be None here rather than FastAPI auto-403ing before this fallback ever runs.
+    token = request.headers.get("X-Auth-Token")
+    if token is not None:
+        return token
+    return credentials.credentials if credentials is not None else None
+
+
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db_session: AsyncSession = Depends(get_db_session),
     redis_client: aioredis.Redis = Depends(get_redis_client),
 ) -> User:
@@ -47,8 +66,12 @@ async def get_current_user(
         status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials"
     )
 
+    token = extract_bearer_token(request, credentials)
+    if token is None:
+        raise unauthorized
+
     try:
-        claims = decode_token(credentials.credentials)
+        claims = decode_token(token)
     except JWTError:
         raise unauthorized
 

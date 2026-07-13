@@ -38,6 +38,12 @@ def _credentials(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
+class _FakeRequest:
+    """No X-Auth-Token header - these tests exercise the Authorization/HTTPBearer fallback."""
+
+    headers: dict = {}
+
+
 def _active_user(user_id: uuid.UUID) -> User:
     return User(
         id=user_id,
@@ -54,7 +60,7 @@ async def test_valid_access_token_returns_active_user():
     redis_client = fakeredis_aioredis.FakeRedis(decode_responses=True)
     db_session = _FakeDBSession(_active_user(user_id))
 
-    user = await get_current_user(_credentials(token), db_session, redis_client)
+    user = await get_current_user(_FakeRequest(), _credentials(token), db_session, redis_client)
 
     assert user.id == user_id
     assert user.is_active
@@ -72,7 +78,7 @@ async def test_revoked_token_is_rejected():
     db_session = _FakeDBSession(_active_user(user_id))
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_current_user(_credentials(token), db_session, redis_client)
+        await get_current_user(_FakeRequest(), _credentials(token), db_session, redis_client)
     assert exc_info.value.status_code == 401
 
 
@@ -83,7 +89,7 @@ async def test_refresh_token_used_as_access_token_is_rejected():
     db_session = _FakeDBSession(_active_user(user_id))
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_current_user(_credentials(refresh_token), db_session, redis_client)
+        await get_current_user(_FakeRequest(), _credentials(refresh_token), db_session, redis_client)
     assert exc_info.value.status_code == 401
 
 
@@ -94,7 +100,7 @@ async def test_unknown_user_is_rejected():
     db_session = _FakeDBSession(None)
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_current_user(_credentials(token), db_session, redis_client)
+        await get_current_user(_FakeRequest(), _credentials(token), db_session, redis_client)
     assert exc_info.value.status_code == 401
 
 
@@ -107,7 +113,7 @@ async def test_inactive_user_is_rejected():
     db_session = _FakeDBSession(inactive_user)
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_current_user(_credentials(token), db_session, redis_client)
+        await get_current_user(_FakeRequest(), _credentials(token), db_session, redis_client)
     assert exc_info.value.status_code == 401
 
 
@@ -118,7 +124,9 @@ async def test_revocation_check_fails_open_when_redis_unavailable(caplog):
     db_session = _FakeDBSession(_active_user(user_id))
 
     with caplog.at_level("WARNING"):
-        user = await get_current_user(_credentials(token), db_session, _UnavailableRedis())
+        user = await get_current_user(
+            _FakeRequest(), _credentials(token), db_session, _UnavailableRedis()
+        )
 
     assert user.id == user_id
     assert "revocation_check_unavailable" in caplog.text
