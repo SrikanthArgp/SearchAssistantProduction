@@ -64,6 +64,11 @@ data "aws_caller_identity" "current" {}
 
 # See the header comment above — required even for same-account Lambda pulls, not just
 # cross-account ones.
+#
+# A seventh gap, next retry: both Lambda functions actually created successfully once the
+# repository policy above existed, but failed on the post-create version read-back
+# (lambda:ListVersionsByFunction, missing from the deploy role's IAM policy — fixed in
+# infra/bootstrap/github-oidc.tf).
 resource "aws_ecr_repository_policy" "backend" {
   repository = aws_ecr_repository.backend.name
   policy = jsonencode({
