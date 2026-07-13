@@ -134,7 +134,10 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
+        # ssm:GetParameters (plural, batch-get) is a distinct IAM action from ssm:GetParameter
+        # (singular) — found missing here because SSM's own ListTagsForResource implementation
+        # calls the plural API internally, not something obvious from the action name alone.
+        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
         Resource = "arn:aws:ssm:*:*:parameter/crag/prod/*"
       },
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
@@ -253,7 +256,10 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
+        # ssm:GetParameters (plural, batch-get) is a distinct IAM action from ssm:GetParameter
+        # (singular) — found missing here because SSM's own ListTagsForResource implementation
+        # calls the plural API internally, not something obvious from the action name alone.
+        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
         Resource = "arn:aws:ssm:*:*:parameter/crag/prod-ecs/*"
       },
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
