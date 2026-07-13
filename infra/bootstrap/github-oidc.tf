@@ -77,7 +77,8 @@ resource "aws_iam_role_policy" "cd_lambda_ecr" {
       {
         Effect = "Allow"
         Action = [
-          "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository", "ecr:TagResource",
+          "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository",
+          "ecr:TagResource", "ecr:ListTagsForResource",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
           "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload",
         ]
@@ -98,7 +99,7 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
         Action = [
           "lambda:CreateFunction", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
           "lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:DeleteFunction",
-          "lambda:AddPermission", "lambda:RemovePermission", "lambda:TagResource",
+          "lambda:AddPermission", "lambda:RemovePermission", "lambda:TagResource", "lambda:ListTags",
           "lambda:CreateFunctionUrlConfig", "lambda:GetFunctionUrlConfig",
           "lambda:UpdateFunctionUrlConfig", "lambda:DeleteFunctionUrlConfig",
         ]
@@ -112,17 +113,17 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
       { Effect = "Allow", Action = ["cloudfront:*"], Resource = "*" },
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource"]
+        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
         Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/crag-prod-backend*"
       },
       {
         Effect   = "Allow"
-        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
+        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:GetBucketTagging", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
         Resource = ["arn:aws:s3:::crag-prod-frontend", "arn:aws:s3:::crag-prod-frontend/*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource"]
+        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
         Resource = "arn:aws:ssm:*:*:parameter/crag/prod/*"
       },
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
@@ -130,7 +131,7 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
         # Needed only on the full-apply (infra-changed) path — Terraform re-asserts
         # lambda_exec's role on every apply, even when the role itself is unchanged.
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:PassRole"]
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = "arn:aws:iam::*:role/crag-prod-lambda-exec"
       },
     ]
@@ -194,7 +195,8 @@ resource "aws_iam_role_policy" "cd_ecs_ecr" {
       {
         Effect = "Allow"
         Action = [
-          "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository", "ecr:TagResource",
+          "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DeleteRepository",
+          "ecr:TagResource", "ecr:ListTagsForResource",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
           "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload",
         ]
@@ -226,23 +228,23 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
       { Effect = "Allow", Action = ["cloudfront:*"], Resource = "*" },
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource"]
+        Action   = ["logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy", "logs:DescribeLogGroups", "logs:TagResource", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]
         Resource = "arn:aws:logs:*:*:log-group:/ecs/crag-prod-ecs*"
       },
       {
         Effect   = "Allow"
-        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
+        Action   = ["s3:CreateBucket", "s3:DeleteBucket", "s3:PutBucketPolicy", "s3:PutBucketPublicAccessBlock", "s3:GetBucketPolicy", "s3:GetBucketTagging", "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
         Resource = ["arn:aws:s3:::crag-prod-ecs-frontend", "arn:aws:s3:::crag-prod-ecs-frontend/*"]
       },
       {
         Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource"]
+        Action   = ["ssm:GetParameter", "ssm:GetParametersByPath", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource", "ssm:ListTagsForResource"]
         Resource = "arn:aws:ssm:*:*:parameter/crag/prod-ecs/*"
       },
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:GenerateDataKey"], Resource = "arn:aws:kms:*:*:alias/aws/ssm" },
       {
         Effect   = "Allow"
-        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:PassRole"]
+        Action   = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:TagRole", "iam:ListRoleTags", "iam:PassRole"]
         Resource = ["arn:aws:iam::*:role/crag-prod-ecs-execution", "arn:aws:iam::*:role/crag-prod-ecs-task"]
       },
       {
