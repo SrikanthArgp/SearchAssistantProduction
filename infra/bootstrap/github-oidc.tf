@@ -242,8 +242,11 @@ resource "aws_iam_role_policy" "cd_ecs_compute" {
         Action   = ["ecs:*"]
         Resource = ["arn:aws:ecs:*:*:cluster/crag-prod-ecs", "arn:aws:ecs:*:*:service/crag-prod-ecs/*", "arn:aws:ecs:*:*:task-definition/crag-prod-ecs-backend:*"]
       },
-      # register-task-definition itself has no useful resource-level restriction.
-      { Effect = "Allow", Action = ["ecs:RegisterTaskDefinition", "ecs:DescribeTaskDefinition"], Resource = "*" },
+      # register/deregister-task-definition have no useful resource-level restriction.
+      # ecs:DeregisterTaskDefinition found missing on the first real-AWS full apply: Terraform
+      # calls it when aws_ecs_task_definition.backend is replaced (destroy+recreate), not just on
+      # a plain `terraform destroy`.
+      { Effect = "Allow", Action = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition", "ecs:DescribeTaskDefinition"], Resource = "*" },
       # VPC/subnet/IGW/route-table/security-group/ALB/target-group creation calls largely don't
       # support resource-level IAM restriction either (standard EC2/ELB limitation) — scoped to
       # the service namespace, same tradeoff as CloudFront above.
