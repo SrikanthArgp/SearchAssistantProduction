@@ -281,3 +281,19 @@ resource "aws_lambda_permission" "cloudfront_function_url" {
   source_arn             = aws_cloudfront_distribution.this.arn
   function_url_auth_type = "AWS_IAM"
 }
+
+# Real gap found manually testing chat on the first real-AWS deploy (2026-07-13): every request
+# through the /v1/sessions/*/stream and /v1/sessions/*/messages behaviors 403'd with Lambda's
+# generic Function URL AccessDeniedException, even though OAC, the origin config, and the
+# permission above all matched AWS's documented pattern exactly. AWS's own OAC-for-Lambda docs
+# (private-content-restricting-access-to-lambda.html) specify granting *two* separate permission
+# statements — lambda:InvokeFunctionUrl (above) *and* lambda:InvokeFunction (this one) — this
+# second one was missing entirely. The stream Lambda had zero invocations in CloudWatch Logs
+# before this fix, confirming CloudFront never got past the permission check to actually reach it.
+resource "aws_lambda_permission" "cloudfront_function_url_invoke" {
+  statement_id  = "AllowCloudFrontServicePrincipalInvokeFunction"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.backend_stream.function_name
+  principal     = "cloudfront.amazonaws.com"
+  source_arn    = aws_cloudfront_distribution.this.arn
+}
