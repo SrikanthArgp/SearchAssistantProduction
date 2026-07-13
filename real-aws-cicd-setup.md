@@ -1,5 +1,14 @@
 # Configuring Real AWS for GitHub Workflows (Stage C)
 
+**Status (2026-07-13): CLOSED for the Lambda target.** Every step below was actually run against
+the real account, `target: lambda, environment: aws` went fully green, and a real chat session was
+manually tested end-to-end in a browser. Eleven real, previously-undiscovered gaps were found and
+fixed along the way — none anticipated by this doc as originally written. See "What Actually
+Happened" at the end of this doc for the short version, or `completed.md`'s Phase 15/18 Stage C
+entry for the full list with root causes. **`target: fargate` has not been dispatched against real
+AWS yet** — `cd-ecs-deploy-role` picked up most of the same IAM fixes proactively, but ECS/ALB/VPC
+have their own resource-creation surface and likely their own new gaps, untested so far.
+
 Scope: one-time setup to make `environment: aws` actually work for `.github/workflows/cd.yml`
 (dispatching to `cd-lambda.yml`/`cd-ecs.yml`) against the real AWS account, now that it exists.
 Everything up to this point (Phase 15/16 Stage A/B, Phase 18/19) was built and verified against
@@ -510,3 +519,45 @@ cd ../fargate && terraform destroy -auto-approve
 Leave `infra/bootstrap` (state bucket/lock table) and the OIDC provider/deploy roles from Step 3
 alone — those are account-level, meant to persist across destroy/reapply cycles of the two deploy
 stacks themselves.
+
+---
+
+## What Actually Happened (2026-07-13)
+
+Every step above was run for real. Step 3's Terraform block in this doc is the **original plan**
+version — the real `infra/bootstrap/github-oidc.tf` has since grown several more IAM permissions
+found only by actually applying and dispatching; treat that file, not this doc's embedded snippet,
+as the source of truth for the current policy. Short version of what was missing and had to be
+added, in the order it was found (`completed.md`'s Phase 15/18 Stage C entry has the full story
+with root causes and exact errors):
+
+- `hashicorp/setup-terraform` in both CD workflows — `ubuntu-latest` ships no Terraform binary.
+- `TF_VAR_use_localstack: ${{ inputs.environment == 'localstack' }}` in both CD workflows — this
+  variable was never actually set, silently defaulting to `true` even in `aws` mode.
+- `providers.tf`'s `profile` gated behind `use_localstack` in both stacks, matching `access_key`/
+  `secret_key`'s existing gating.
+- `ecr:ListTagsForResource`, `lambda:ListTags`, `logs:ListTagsForResource`/`ListTagsLogGroup`,
+  `ssm:ListTagsForResource`, `iam:ListRoleTags`, `s3:GetBucketTagging` (or broader `s3:Get*`/
+  `s3:List*`) — Terraform reads tags back unconditionally, even when nothing sets any.
+- `logs:DescribeLogGroups` and `ssm:DescribeParameters` as their own `Resource: "*"` statements —
+  neither supports resource-level restriction at all.
+- `ssm:GetParameters` (plural) alongside `ssm:GetParameter` (singular) — distinct actions.
+- `aws_ecr_repository_policy` granting `lambda.amazonaws.com` pull access — **a real design gap**,
+  not an IAM-role issue: `ecr.tf`'s original claim that same-account Lambda pulls need no
+  repository policy was wrong.
+- `lambda:ListVersionsByFunction`, `lambda:GetPolicy`, `iam:ListInstanceProfilesForRole` — assorted
+  post-create read-back permissions, found one apply at a time.
+- A second `aws_lambda_permission` (`lambda:InvokeFunction`, alongside the existing
+  `lambda:InvokeFunctionUrl`) for CloudFront's service principal — AWS's own OAC-for-Lambda docs
+  require both; only one existed.
+- **Not an infra gap at all**: CloudFront's OAC overwrites the `Authorization` header with its own
+  AWS SigV4 signature before forwarding to the streaming Lambda's Function URL origin, which broke
+  this app's own JWT bearer auth on that path (chat history + chat send, both 401'd) even after
+  every other piece was fixed. Real application-code fix, not Terraform: the frontend now also
+  sends the token via a custom `X-Auth-Token` header (which OAC doesn't touch), and the backend
+  checks that header first, falling back to `Authorization` — see `backend/auth/dependencies.py`'s
+  `extract_bearer_token` and `frontend/lib/api.ts`'s `rawFetch`.
+
+End state: `https://d1at67obwaojws.cloudfront.net` serves the real app — login, logout, session
+list, chat history, and streaming a new chat message all confirmed working in an actual browser,
+backed by the real Supabase Postgres and Upstash Redis. Nothing has been torn down.
