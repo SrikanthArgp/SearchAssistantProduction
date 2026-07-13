@@ -104,6 +104,7 @@ resource "aws_iam_role_policy" "cd_lambda_compute" {
           "lambda:CreateFunction", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
           "lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:DeleteFunction",
           "lambda:AddPermission", "lambda:RemovePermission", "lambda:TagResource", "lambda:ListTags",
+          "lambda:ListVersionsByFunction",
           "lambda:CreateFunctionUrlConfig", "lambda:GetFunctionUrlConfig",
           "lambda:UpdateFunctionUrlConfig", "lambda:DeleteFunctionUrlConfig",
         ]
