@@ -27,6 +27,10 @@ data "aws_availability_zones" "available" {
 # Re-touched again (2026-07-14, still no content change): LocalStack was reset (fresh container,
 # infra/bootstrap/ reapplied) so this stack has no resources at all right now, but the last real
 # commit only touched docs — same gap, same recovery.
+#
+# Re-touched a third time in the same commit as the terraform_wrapper: false fix (cd-ecs.yml) —
+# bundled deliberately so this dispatch doesn't repeat the documented "next commit only touched
+# workflow YAML" gotcha from infra/lambda-gate/ecr.tf's comment history.
 
 resource "aws_vpc" "this" {
   cidr_block           = "10.0.0.0/16"

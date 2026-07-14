@@ -3,6 +3,11 @@
 # was reset (fresh container, infra/bootstrap/ reapplied 2026-07-14) so this stack has no
 # resources at all right now, but the last real commit only touched docs, so a non-infra diff
 # would take the fast (image-only) path against a stack that doesn't exist yet.
+#
+# Re-touched again in the same commit as the terraform_wrapper: false fix (cd-lambda.yml) —
+# bundled deliberately, not as two separate commits, so this dispatch doesn't repeat the
+# documented "next commit only touched workflow YAML, so the filter said no infra changes"
+# gotcha from this same file's earlier comment history.
 
 provider "aws" {
   region = var.aws_region

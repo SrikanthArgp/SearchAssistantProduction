@@ -124,9 +124,21 @@ jobs:
         # `terraform: command not found` (exit 127) at the first `terraform init` call. Pinned
         # to 1.15.7 to match what's already used everywhere else in this repo (see
         # infra/lambda-gate/backend-localstack.hcl's comment).
+        #
+        # terraform_wrapper: false — real gap found re-registering the self-hosted runner
+        # (2026-07-14): the action's default Node-based wrapper shim resolves its own path
+        # wrong under this runner's Git Bash (`shell: bash` above), failing every `terraform`
+        # invocation with "Error: Cannot find module 'C:\c\gh-runner\...\terraform'" (an extra
+        # "c\" spliced in right after the drive letter) before it ever reaches real Terraform.
+        # The wrapper only exists to capture stdout/exit-code as step outputs and mask secrets
+        # in logs — neither used anywhere in this workflow, which only ever runs plain
+        # `terraform init`/`apply` shell commands — so disabling it removes the broken code
+        # path entirely rather than working around it. No effect on ubuntu-latest, where the
+        # wrapper never showed this bug.
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+          terraform_wrapper: false
 
       - name: Terraform init (infra changed)
         if: steps.changes.outputs.infra == 'true'

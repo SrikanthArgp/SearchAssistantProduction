@@ -97,10 +97,13 @@ jobs:
       - name: Setup Terraform
         # See cd-lambda.yml's identical step for the full explanation — ubuntu-latest ships no
         # Terraform binary, only ever masked by the self-hosted Windows runner already having it
-        # installed locally for every prior LocalStack run.
+        # installed locally for every prior LocalStack run. terraform_wrapper: false works around
+        # a second real gap found the same day: the action's default wrapper shim mis-resolves
+        # its own path under this runner's Git Bash, failing every `terraform` call outright.
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+          terraform_wrapper: false
 
       - name: Terraform init (infra changed)
         if: steps.changes.outputs.infra == 'true'
