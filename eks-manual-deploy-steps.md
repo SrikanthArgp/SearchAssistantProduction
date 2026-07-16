@@ -1,6 +1,6 @@
 # Phase 20 — EKS Manual Deploy: Runbook (as-built)
 
-Step-by-step commands to stand up the Phase 20 EKS deployment on real AWS from nothing, matching what's actually in `infra/eks/` and `gitops/multi-agent/` today — not the original design in [`eks-enterprize-deploy-steps.md`](./eks-enterprize-deploy-steps.md), which still describes a Secrets Store CSI Driver and a two-Terraform-config CloudFront split that were never built. See that doc's "Built vs. Designed" section for the full list of deviations this runbook already reflects. There is no CD automation for any of this (Phase 21/ArgoCD isn't built either — see [`ci-cd-eks-steps.md`](./ci-cd-eks-steps.md)); every step below is run by hand.
+Step-by-step commands to stand up the Phase 20 EKS deployment on real AWS from nothing, matching what's actually in `infra/eks/` and `gitops/multi-agent/` today — not the original design in [`eks-enterprize-deploy-steps.md`](./eks-enterprize-deploy-steps.md), which still describes a Secrets Store CSI Driver and a two-Terraform-config CloudFront split that were never built. See that doc's "Built vs. Designed" section for the full list of deviations this runbook already reflects. **Phase 21/ArgoCD is now built** (see [`ci-cd-eks-steps.md`](./ci-cd-eks-steps.md)) and handles the *ongoing* image-tag bump once this runbook's Stages 1–8 have stood the cluster up at least once — this runbook itself is still run entirely by hand, since Phase 21 never automates the initial cluster bring-up or Helm install, only redeploys of an already-bootstrapped cluster.
 
 ---
 
