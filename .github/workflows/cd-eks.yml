@@ -163,6 +163,19 @@ jobs:
           IMAGE_TAG: eks-${{ inputs.sha }}
           BOT_PUSH_TOKEN: ${{ secrets.BOT_PUSH_TOKEN }}
         run: |
+          # actions/checkout@v4 (both instances in this job) configures a local
+          # http.https://github.com/.extraheader with a Basic-auth Authorization header derived
+          # from GITHUB_TOKEN, and that config persists for the whole job (only unset in the
+          # job's own automatic "Post Checkout" cleanup, which runs *after* this step). Found
+          # 2026-07-16, after 6 dispatch attempts all failing identically regardless of which PAT
+          # was in BOT_PUSH_TOKEN: git sends that leftover header on every request to
+          # github.com, and it silently wins over the x-access-token credential embedded in the
+          # push URL below — every prior attempt was actually still authenticating as
+          # GITHUB_TOKEN, never the PAT. Must be unset immediately before this push, not just
+          # relying on persist-credentials on the checkout step (both checkouts in this job are
+          # needed for their own default credentials — the first for "Detect infra changes"'s
+          # diff, the second only needs to not clobber this one push).
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git fetch origin main
           git checkout -B main origin/main
           sed -i "s/^  tag: .*/  tag: ${IMAGE_TAG}/" gitops/multi-agent/values.yaml
