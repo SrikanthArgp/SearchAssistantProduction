@@ -11,8 +11,10 @@ Status: **built** — `.github/workflows/ci.yml` exists with both jobs, verified
 ```mermaid
 flowchart LR
     Dev(["Developer"]) -->|push / PR to main| Trigger["GitHub Actions trigger\non: push, pull_request"]
-    Trigger --> BJob["Job: backend"]
-    Trigger --> FJob["Job: frontend"]
+    Trigger --> Changes["Job: changes\ndorny/paths-filter\ncode: ** except **/*.md"]
+    Changes -->|code changed| BJob["Job: backend"]
+    Changes -->|code changed| FJob["Job: frontend"]
+    Changes -->|docs-only, code=false| SkippedNote["backend/frontend jobs skipped\n(reported as passing, not blocking —\nrequired status checks still get a run)"]
 
     BJob --> Checkout["Checkout code"]
     Checkout --> SetupUV["Install uv\n(astral-sh/setup-uv)"]

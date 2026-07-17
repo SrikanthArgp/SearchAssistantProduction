@@ -10,19 +10,20 @@ Status: planning only, nothing built yet. **Hard prerequisites: Phase 15 (Lambda
 
 ```mermaid
 flowchart LR
-    Manual["workflow_dispatch\n(manual run — cd.yml, dev phase)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
-    Dispatcher -->|"target: lambda or both"| Trigger["cd-lambda.yml invoked\n(workflow_call, sha input)"]
+    Manual["workflow_dispatch\n(manual run — cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: lambda, both, or all"| Trigger["cd-lambda.yml invoked\n(workflow_call, sha input)"]
     Trigger --> OIDC["Assume cd-lambda-deploy-role via\nGitHub OIDC (id-token: write)\nindependent of Phase 19's role\nno long-lived AWS keys"]
     OIDC --> Build["docker build\n(Lambda Web Adapter image)\nchecked out at inputs.sha"]
     Build --> Push["Push to ECR\ntag: sha"]
-    Push --> PathCheck{"Diff touches\ninfra/** ?"}
-    PathCheck -->|no — image only| FastPath["aws lambda update-function-code\n--image-uri ecr-repo:sha"]
-    PathCheck -->|yes — infra changed| SlowPath["terraform apply\n(infra/ Terraform root)"]
-    FastPath --> Wait["aws lambda wait\nfunction-updated"]
+    Push --> PathCheck{"Diff touches\ninfra/lambda-gate/** ?"}
+    PathCheck -->|no — image only| FastPath["Update both functions:\naws lambda update-function-code\n(backend + backend_stream)"]
+    PathCheck -->|yes — infra changed| SlowPath["terraform apply\n(infra/lambda-gate/)"]
+    FastPath --> Wait["aws lambda wait\nfunction-updated (both)"]
     SlowPath --> Wait
     Wait --> Smoke["Smoke check:\nGET /health via CloudFront URL"]
-    Smoke -->|pass| Done["Deploy complete"]
-    Smoke -->|fail| Rollback["Roll back:\nupdate-function-code to the\nprevious known-good sha"]
+    Smoke -->|fail, fast path only| Rollback["Roll back:\nupdate-function-code (both)\nto previous known-good sha"]
+    Smoke -->|pass| Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
+    Frontend --> Done["Deploy complete"]
 ```
 
 ---

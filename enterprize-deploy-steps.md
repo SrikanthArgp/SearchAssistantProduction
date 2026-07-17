@@ -20,14 +20,15 @@ flowchart TD
         S3["S3 Bucket (private)\nNext.js static export"]
     end
 
-    subgraph Compute["Compute — Lambda"]
-        APIGW["API Gateway HTTP API v2\n$default route"]
+    subgraph Compute["Compute — Lambda (two functions, same image)"]
+        APIGW["API Gateway HTTP API v2\n$default route + /health"]
         FURL["Lambda Function URL\ninvoke_mode=RESPONSE_STREAM\nauth_type=AWS_IAM"]
-        Lambda["Lambda Function\n(container image +\nAWS Lambda Web Adapter)"]
+        Lambda["backend Function\n(buffered, container image +\nAWS Lambda Web Adapter)"]
+        LambdaStream["backend_stream Function\n(RESPONSE_STREAM, same image)"]
     end
 
     subgraph IAM["IAM"]
-        Role["lambda_exec Role\nlogs + ssm + kms policies"]
+        Role["lambda_exec Role\nlogs + ssm + kms policies\n(shared by both functions)"]
     end
 
     subgraph Config["Config & Registry"]
@@ -44,15 +45,19 @@ flowchart TD
     Browser -->|HTTPS| CF
     CF -->|"default behavior\nvia s3_oac"| S3
     CF -->|"/v1/sessions/*/stream (+send)\nvia lambda_oac, SigV4"| FURL
-    CF -->|"/v1/* (everything else)"| APIGW
+    CF -->|"/v1/* (everything else) and /health\nvia apigw"| APIGW
     APIGW -->|"Lambda proxy integration\nlambda:InvokeFunction"| Lambda
-    FURL -->|"lambda:InvokeFunctionUrl"| Lambda
+    FURL -->|"lambda:InvokeFunctionUrl"| LambdaStream
     Lambda -.->|"pulls image at deploy"| ECR
+    LambdaStream -.->|"pulls image at deploy"| ECR
     Lambda -->|assumes| Role
+    LambdaStream -->|assumes| Role
     Role -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     Role -.->|"logs:PutLogEvents"| CW
     Lambda -->|"TLS, rediss://"| Upstash
     Lambda -->|TLS| Supabase
+    LambdaStream -->|"TLS, rediss://"| Upstash
+    LambdaStream -->|TLS| Supabase
 ```
 
 ---

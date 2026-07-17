@@ -21,21 +21,26 @@ Real deviations from this doc's own design below, found building and verifying i
 
 ```mermaid
 flowchart LR
-    Manual["workflow_dispatch\n(manual run — cd.yml, dev phase;\nsee cd-dispatcher-steps.md for\nwhether this is still current)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Manual["workflow_dispatch\n(manual run — cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
     Dispatcher -->|"target: eks or all"| Trigger["cd-eks.yml invoked\n(workflow_call, sha input)"]
-    Trigger --> OIDC["Assume cd-eks-deploy-role via\nGitHub OIDC\n(ECR push only — no eks:*,\nno kubectl-equivalent permission)"]
-    OIDC --> Build["docker build\n(non-adapter image,\nreused unchanged from Phase 16/20)\nimage built from inputs.sha"]
+    Trigger --> OIDC["Assume cd-eks-deploy-role via\nGitHub OIDC\n(broad: eks:*, ec2:*, elb:*,\ncloudfront:*, this stack's own IAM\nroles, ECR — but NO Kubernetes-API\naccess, so it still can't deploy\npods itself — see Built vs. Designed)"]
+    OIDC --> Build["docker build\n(same image as Phase 16/20,\nadapter layer inert)\nimage built from inputs.sha"]
     Build --> Push["Push to ECR\ntag: eks-sha (immutable)"]
-    Push --> FreshMain["fetch + checkout main's\ncurrent tip (NOT inputs.sha —\nsee Gotchas: never push a\ndetached-HEAD checkout to main)"]
-    FreshMain --> Bump["yq -i patch\ngitops/multi-agent/values.yaml\nimage.tag = eks-sha"]
-    Bump --> Commit["git commit + push to main\n(GITHUB_TOKEN, contents: write,\nauthor: github-actions[bot])\nWorkflow job ends here"]
+    Push --> PathCheck{"Diff touches\ninfra/eks/** ?"}
+    PathCheck -->|yes — infra changed| SlowPath["terraform apply\n(infra/eks/)"]
+    PathCheck -->|no| FreshMain["fetch + checkout main's\ncurrent tip (NOT inputs.sha —\nsee Gotchas: never push a\ndetached-HEAD checkout to main)"]
+    SlowPath --> FreshMain
+    FreshMain --> StripAuth["git config --unset-all\nhttp.../.extraheader\n(strip checkout's leftover\nGITHUB_TOKEN auth header — see Gotchas)"]
+    StripAuth --> Bump["sed -i patch\ngitops/multi-agent/values.yaml\nimage.tag = eks-sha"]
+    Bump --> Commit["git commit + push to main\n(BOT_PUSH_TOKEN PAT, not GITHUB_TOKEN —\nauthor: github-actions[bot])\nWorkflow job continues"]
     Commit -.->|"Git diff on\ngitops/multi-agent/**\n(polled, ~3min default,\nor argocd app sync manually)"| ArgoWatch["ArgoCD Application\n(already running in-cluster,\nfrom Phase 20)"]
     ArgoWatch --> Sync["OutOfSync -> Syncing"]
     Sync --> Apply["ArgoCD applies the Helm\nchart diff to the cluster\n(no CI job touches kubectl)"]
     Apply --> Health{"Rollout healthy?"}
     Health -->|yes| Healthy["Synced / Healthy\nnew pods serving"]
-    Health -->|no, e.g. bad image tag| Degraded["Degraded —\nprevious pods keep serving,\nrollout does not complete"]
-    Healthy --> Smoke["Manual/scripted smoke test:\nregister -> login -> chat via\nALB/CloudFront URL"]
+    Health -->|no, e.g. bad image tag| Degraded["Degraded —\nprevious pods keep serving,\nrollout does not complete\n(no rollback wired for this\ntarget yet — known gap)"]
+    Healthy --> Smoke["Automated smoke check:\ncurl /health via CloudFront\n(retries up to ~6min for\nArgoCD's polling interval)"]
+    Smoke --> Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
 ```
 
 ---

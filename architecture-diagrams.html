@@ -272,14 +272,15 @@ flowchart TD
         S3["S3 Bucket (private)\nNext.js static export"]
     end
 
-    subgraph Compute["Compute - Lambda"]
-        APIGW["API Gateway HTTP API v2\n$default route"]
+    subgraph Compute["Compute - Lambda (two functions, same image)"]
+        APIGW["API Gateway HTTP API v2\n$default route + /health"]
         FURL["Lambda Function URL\ninvoke_mode=RESPONSE_STREAM\nauth_type=AWS_IAM"]
-        Lambda["Lambda Function\n(container image +\nAWS Lambda Web Adapter)"]
+        Lambda["backend Function\n(buffered, container image +\nAWS Lambda Web Adapter)"]
+        LambdaStream["backend_stream Function\n(RESPONSE_STREAM, same image)"]
     end
 
     subgraph IAM["IAM"]
-        Role["lambda_exec Role\nlogs + ssm + kms policies"]
+        Role["lambda_exec Role\nlogs + ssm + kms policies\n(shared by both functions)"]
     end
 
     subgraph Config["Config and Registry"]
@@ -296,15 +297,19 @@ flowchart TD
     Browser -->|HTTPS| CF
     CF -->|"default behavior\nvia s3_oac"| S3
     CF -->|"/v1/sessions/*/stream (+send)\nvia lambda_oac, SigV4"| FURL
-    CF -->|"/v1/* (everything else)"| APIGW
+    CF -->|"/v1/* (everything else) and /health\nvia apigw"| APIGW
     APIGW -->|"Lambda proxy integration\nlambda:InvokeFunction"| Lambda
-    FURL -->|"lambda:InvokeFunctionUrl"| Lambda
+    FURL -->|"lambda:InvokeFunctionUrl"| LambdaStream
     Lambda -.->|"pulls image at deploy"| ECR
+    LambdaStream -.->|"pulls image at deploy"| ECR
     Lambda -->|assumes| Role
+    LambdaStream -->|assumes| Role
     Role -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     Role -.->|"logs:PutLogEvents"| CW
     Lambda -->|"TLS, rediss://"| Upstash
     Lambda -->|TLS| Supabase
+    LambdaStream -->|"TLS, rediss://"| Upstash
+    LambdaStream -->|TLS| Supabase
         </pre>
       </div>
     </div>
@@ -338,7 +343,7 @@ flowchart TD
         ALB["Application Load Balancer\nHTTP:80 listener"]
         TG["Target Group\ntarget_type=ip, health check /health"]
         subgraph Service["ECS Service (Fargate, desired count 1)"]
-            Task["Fargate Task\ncontainer port 8000\nnon-adapter image"]
+            Task["Fargate Task\ncontainer port 8000\nsame image as Phase 15\n(adapter layer present but inert)"]
         end
     end
 
@@ -366,7 +371,7 @@ flowchart TD
 
     Browser -->|HTTPS| CF
     CF -->|"default behavior\nvia OAC"| S3
-    CF -->|"/v1/* - HTTP-only origin\n(no ACM cert)"| ALB
+    CF -->|"/v1/* and /health\nHTTP-only origin (no ACM cert)"| ALB
     ALB -.->|protected by| ALBSG
     ALB --> TG
     TG --> Task
@@ -400,17 +405,36 @@ flowchart TD
         <pre class="mermaid">
 flowchart LR
     Dev(["Developer"]) -->|push / PR to main| Trigger["GitHub Actions trigger\non: push, pull_request"]
-    Trigger --> Checkout["Checkout code"]
+    Trigger --> Changes["Job: changes\ndorny/paths-filter\ncode: ** except **/*.md"]
+    Changes -->|code changed| BJob["Job: backend"]
+    Changes -->|code changed| FJob["Job: frontend"]
+    Changes -->|docs-only, code=false| SkippedNote["backend/frontend jobs skipped\n(reported as passing, not blocking -\nrequired status checks still get a run)"]
+
+    BJob --> Checkout["Checkout code"]
     Checkout --> SetupUV["Install uv\n(astral-sh/setup-uv)"]
-    SetupUV --> Sync["uv sync --extra dev --frozen\n(backend/, working-directory)"]
+    SetupUV --> Sync["uv sync --extra dev --extra prod --extra eval --frozen\n(backend/, working-directory)"]
     Sync --> Lint["ruff check ."]
-    Lint -->|fail| Blocked1["Workflow fails\nPR shows red X"]
-    Lint -->|pass| Test["python -m pytest -m not-integration\n(fast unit tier)"]
-    Test -->|fail| Blocked2["Workflow fails\nPR shows red X"]
-    Test -->|pass| Green["Status check: success"]
-    Green --> Gate{"Required status check\nset in branch protection?"}
-    Gate -->|yes| Merge["Merge blocked until green\n(actually enforced)"]
-    Gate -->|no| Warn["Green check is advisory only -\nmerge is NOT actually blocked"]
+    Lint -->|fail| Blocked1["backend job fails"]
+    Lint -->|pass| Test["python -m pytest -m not integration\nand not requires_db and not requires_redis"]
+    Test -->|fail| Blocked1
+    Test -->|pass| BGreen["backend: success"]
+
+    FJob --> FCheckout["Checkout code"]
+    FCheckout --> SetupNode["Install Node 20\n(actions/setup-node, npm cache)"]
+    SetupNode --> NpmCi["npm ci\n(frontend/, working-directory)"]
+    NpmCi --> FLint["eslint"]
+    FLint -->|fail| Blocked2["frontend job fails"]
+    FLint -->|pass| FTest["npm test (Vitest)"]
+    FTest -->|fail| Blocked2
+    FTest -->|pass| Build["next build"]
+    Build -->|fail| Blocked2
+    Build -->|pass| FGreen["frontend: success"]
+
+    BGreen --> Green["Both jobs green"]
+    FGreen --> Green
+    Green --> Gate{"Required status checks\nset in branch protection?"}
+    Gate -->|yes| Merge["Merge blocked until both green\n(actually enforced)"]
+    Gate -->|no| Warn["Green checks are advisory only -\nmerge is NOT actually blocked"]
         </pre>
       </div>
     </div>
@@ -430,18 +454,20 @@ flowchart LR
       <div class="diagram-canvas">
         <pre class="mermaid">
 flowchart LR
-    CIPass(["Phase 17 CI: green\non push to main"]) --> Trigger["cd-lambda.yml triggers\non: push to main"]
-    Trigger --> OIDC["Assume IAM role via\nGitHub OIDC (id-token: write)\nno long-lived AWS keys"]
-    OIDC --> Build["docker build\n(Lambda Web Adapter image)"]
-    Build --> Push["Push to ECR\ntag: git-sha"]
-    Push --> PathCheck{"Diff touches\ninfra/** ?"}
-    PathCheck -->|no - image only| FastPath["aws lambda update-function-code\n--image-uri ecr-repo:sha"]
-    PathCheck -->|yes - infra changed| SlowPath["terraform apply\n(infra/ Terraform root)"]
-    FastPath --> Wait["aws lambda wait\nfunction-updated"]
+    Manual["workflow_dispatch\n(manual run - cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: lambda, both, or all"| Trigger["cd-lambda.yml invoked\n(workflow_call, sha input)"]
+    Trigger --> OIDC["Assume cd-lambda-deploy-role via\nGitHub OIDC (id-token: write)\nindependent of Phase 19's role\nno long-lived AWS keys"]
+    OIDC --> Build["docker build\n(Lambda Web Adapter image)\nchecked out at inputs.sha"]
+    Build --> Push["Push to ECR\ntag: sha"]
+    Push --> PathCheck{"Diff touches\ninfra/lambda-gate/** ?"}
+    PathCheck -->|no - image only| FastPath["Update both functions:\naws lambda update-function-code\n(backend + backend_stream)"]
+    PathCheck -->|yes - infra changed| SlowPath["terraform apply\n(infra/lambda-gate/)"]
+    FastPath --> Wait["aws lambda wait\nfunction-updated (both)"]
     SlowPath --> Wait
     Wait --> Smoke["Smoke check:\nGET /health via CloudFront URL"]
-    Smoke -->|pass| Done["Deploy complete"]
-    Smoke -->|fail| Rollback["Roll back:\nupdate-function-code to the\nprevious known-good sha"]
+    Smoke -->|fail, fast path only| Rollback["Roll back:\nupdate-function-code (both)\nto previous known-good sha"]
+    Smoke -->|pass| Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
+    Frontend --> Done["Deploy complete"]
         </pre>
       </div>
     </div>
@@ -461,19 +487,20 @@ flowchart LR
       <div class="diagram-canvas">
         <pre class="mermaid">
 flowchart LR
-    CIPass(["Phase 17 CI: green\non push to main"]) --> Trigger["cd-ecs.yml triggers\non: push to main"]
-    Trigger --> OIDC["Assume IAM role via\nGitHub OIDC\n(shared role + ECS perms)"]
-    OIDC --> Build["docker build\n(non-adapter image,\nplain uvicorn CMD)"]
-    Build --> Push["Push to ECR\ntag: git-sha"]
-    Push --> Register["Register new ECS task\ndefinition revision\nimage = repo:sha"]
-    Register --> PathCheck{"Diff touches\ninfra/** ?"}
-    PathCheck -->|no| FastPath["aws ecs update-service\n--task-definition new-rev\n--force-new-deployment"]
-    PathCheck -->|yes| SlowPath["terraform apply\n(infra/ Terraform root)"]
+    Manual["workflow_dispatch\n(manual run - cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: fargate, both, or all"| Trigger["cd-ecs.yml invoked\n(workflow_call, sha input)"]
+    Trigger --> OIDC["Assume cd-ecs-deploy-role via\nGitHub OIDC\n(own role, own ECS perms -\nindependent of Phase 18's role)"]
+    OIDC --> Build["docker build\n(same image as Phase 18,\nadapter layer inert)\nchecked out at inputs.sha"]
+    Build --> Push["Push to ECR\ntag: ecs-sha"]
+    Push --> PathCheck{"Diff touches\ninfra/fargate/** ?"}
+    PathCheck -->|no| FastPath["Register new ECS task def revision\n+ aws ecs update-service\n--force-new-deployment"]
+    PathCheck -->|yes| SlowPath["terraform apply\n(infra/fargate/)"]
     FastPath --> WaitStable["aws ecs wait\nservices-stable"]
     SlowPath --> WaitStable
+    WaitStable -->|deployment circuit\nbreaker trips| AutoRollback["ECS deployment circuit breaker\nauto-rolls back to previous\ntask definition revision"]
     WaitStable -->|stable| Smoke["Smoke check:\nGET /health via CloudFront URL"]
-    WaitStable -->|circuit breaker trips| AutoRollback["ECS deployment circuit breaker\nauto-rolls back to previous\ntask definition revision"]
-    Smoke -->|pass| Done["Deploy complete"]
+    Smoke -->|pass| Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
+    Frontend --> Done["Deploy complete"]
         </pre>
       </div>
     </div>
@@ -481,7 +508,7 @@ flowchart LR
 
   <section class="diagram-section" id="phase-20">
     <h2>Phase 20 &mdash; AWS Container Deployment (EKS)</h2>
-    <p class="subtitle">Source: <code>eks-enterprize-deploy-steps.md</code></p>
+    <p class="subtitle">Source: <code>eks-enterprize-deploy-steps.md</code> &mdash; as-built (see that doc's "Built vs. Designed" section for the full diff against the original design)</p>
     <div class="diagram-toolbar" data-toolbar-for="viewport-20">
       <button data-action="zoom-out" aria-label="Zoom out">&minus;</button>
       <span class="zoom-level">100%</span>
@@ -499,22 +526,21 @@ flowchart TD
         CF["CloudFront Distribution\nsingle /v1/* -&gt; ALB behavior"]
     end
 
-    subgraph Frontend["Static Frontend (S3 bucket reused read-only from Phase 15)"]
-        S3["S3 Bucket (private)"]
+    subgraph Frontend["Static Frontend (own dedicated bucket,\nNOT reused from Phase 15)"]
+        S3["S3 Bucket (private)\ncrag-prod-eks-frontend"]
     end
 
     subgraph VPC["New VPC - 2 public subnets across 2 AZs + IGW\n(mirrors Phase 16 public-subnet/no-NAT shape, kept separate)"]
         subgraph EKS["EKS Cluster"]
             CP["EKS Control Plane\n(AWS-managed)"]
-            subgraph NG["Managed Node Group (EC2, desired 1-2)"]
+            subgraph NG["Managed Node Group (EC2, desired 1)\nHPA wired (min1/max3, CPU) but non-functional -\nno metrics-server installed in-cluster"]
                 Node["Worker Node(s)"]
-                Pod["Backend Pod(s)\nDeployment + HPA (CPU)"]
+                Pod["Backend Pod\nreads SSM directly via IRSA + boto3\n(config.py bootstrap_env) - no envFrom,\nno K8s Secret object"]
                 LBCPod["aws-load-balancer-controller\nDeployment (kube-system)"]
-                CSIPod["secrets-store-csi-driver +\naws provider (DaemonSet)"]
             end
         end
         ALB["Application Load Balancer\n(provisioned BY the controller\nfrom the Ingress, not by Terraform)"]
-        TG["Target Group\ntarget_type=ip -&gt; pods directly"]
+        TG["Target Group\ntarget_type=ip -&gt; pod directly"]
     end
 
     subgraph SG["Security Groups"]
@@ -523,17 +549,16 @@ flowchart TD
         ALBSG["ALB SG (controller-managed)\ningress 80/443 from 0.0.0.0/0"]
     end
 
-    subgraph IAM["IAM (via OIDC provider, IRSA)"]
+    subgraph IAM["IAM (via OIDC provider, IRSA) - 4 roles total, no CSI role"]
         ClusterRole["EKS Cluster Role"]
         NodeRole["Node Instance Role\nAmazonEKSWorkerNodePolicy +\nCNI + ECR-ReadOnly"]
         LBCRole["IRSA: aws-load-balancer-controller\nServiceAccount role"]
-        CSIRole["IRSA: secrets-store-csi-driver\nServiceAccount role\nssm:GetParameter + kms:Decrypt"]
+        BackendRole["IRSA: backend_irsa\nssm:GetParameter + kms:Decrypt\ndirectly assumed by the backend\npod's own ServiceAccount"]
     end
 
-    subgraph Config["Config, Registry (reused from Phase 15)"]
-        ECR["ECR Repository\n:eks tag (non-adapter image, reused from Phase 16)"]
-        SSM["SSM Parameter Store\n/crag/prod/*"]
-        K8sSecret["K8s Secret\n(synced from SSM by CSI driver)"]
+    subgraph Config["Config, Registry (own, dedicated -\nnot reused from Phase 15/16)"]
+        ECR["ECR Repository\nown repo, own image\n(adapter layer present but inert)"]
+        SSM["SSM Parameter Store\n/crag/prod-eks/*"]
     end
 
     subgraph External["External SaaS (public HTTPS)"]
@@ -543,16 +568,14 @@ flowchart TD
 
     Browser -->|HTTPS| CF
     CF -->|"default behavior\nvia OAC"| S3
-    CF -->|"/v1/* - HTTP-only origin\n(no ACM cert, same as Phase 16)"| ALB
+    CF -->|"/v1/* and /health - HTTP-only origin\n(no ACM cert, same as Phase 16)"| ALB
     ALB -.->|protected by| ALBSG
     ALB --> TG
     TG --> Pod
     LBCPod -.->|"watches Ingress,\nprovisions/updates"| ALB
     LBCPod -->|assumes| LBCRole
-    CSIPod -->|assumes| CSIRole
-    CSIRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
-    CSIPod -->|"syncSecret: true"| K8sSecret
-    Pod -->|"envFrom: secretRef"| K8sSecret
+    Pod -->|"assumes via IRSA,\nboto3 at runtime"| BackendRole
+    BackendRole -.->|"ssm:GetParameter\nkms:Decrypt"| SSM
     Node -.->|protected by| NodeSG
     CP -.->|protected by| ClusterSG
     Node -->|assumes| NodeRole
@@ -578,19 +601,26 @@ flowchart TD
       <div class="diagram-canvas">
         <pre class="mermaid">
 flowchart LR
-    CIPass(["Phase 17 CI: green\non push to main"]) --> Trigger["cd-eks.yml triggers\non: push to main\npaths-ignore: gitops/multi-agent/**"]
-    Trigger --> OIDC["Assume IAM role via\nGitHub OIDC\n(ECR push only - no eks:*,\nno kubectl-equivalent permission)"]
-    OIDC --> Build["docker build\n(non-adapter image,\nreused unchanged from Phase 16/20)"]
-    Build --> Push["Push to ECR\ntag: eks-git-sha (immutable)"]
-    Push --> Bump["yq -i patch\ngitops/multi-agent/values.yaml\nimage.tag = eks-sha"]
-    Bump --> Commit["git commit + push to main\n(GITHUB_TOKEN, contents: write,\nauthor: github-actions[bot])\nWorkflow job ends here"]
+    Manual["workflow_dispatch\n(manual run - cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: eks or all"| Trigger["cd-eks.yml invoked\n(workflow_call, sha input)"]
+    Trigger --> OIDC["Assume cd-eks-deploy-role via\nGitHub OIDC\n(broad: eks:*, ec2:*, elb:*,\ncloudfront:*, this stack's own IAM\nroles, ECR - but NO Kubernetes-API\naccess, so it still can't deploy\npods itself)"]
+    OIDC --> Build["docker build\n(same image as Phase 16/20,\nadapter layer inert)"]
+    Build --> Push["Push to ECR\ntag: eks-sha (immutable)"]
+    Push --> PathCheck{"Diff touches\ninfra/eks/** ?"}
+    PathCheck -->|yes - infra changed| SlowPath["terraform apply\n(infra/eks/)"]
+    PathCheck -->|no| FreshMain["fetch + checkout main's\ncurrent tip (NOT the built sha -\nnever push a detached-HEAD\ncheckout to main)"]
+    SlowPath --> FreshMain
+    FreshMain --> StripAuth["git config --unset-all\nhttp.../.extraheader\n(strip checkout's leftover\nGITHUB_TOKEN auth header)"]
+    StripAuth --> Bump["sed -i patch\ngitops/multi-agent/values.yaml\nimage.tag = eks-sha"]
+    Bump --> Commit["git commit + push to main\n(BOT_PUSH_TOKEN PAT, not GITHUB_TOKEN -\nauthor: github-actions[bot])"]
     Commit -.->|"Git diff on\ngitops/multi-agent/**\n(polled, ~3min default,\nor argocd app sync manually)"| ArgoWatch["ArgoCD Application\n(already running in-cluster,\nfrom Phase 20)"]
     ArgoWatch --> Sync["OutOfSync -> Syncing"]
     Sync --> Apply["ArgoCD applies the Helm\nchart diff to the cluster\n(no CI job touches kubectl)"]
     Apply --> Health{"Rollout healthy?"}
     Health -->|yes| Healthy["Synced / Healthy\nnew pods serving"]
-    Health -->|no, e.g. bad image tag| Degraded["Degraded -\nprevious pods keep serving,\nrollout does not complete"]
-    Healthy --> Smoke["Manual/scripted smoke test:\nregister -> login -> chat via\nALB/CloudFront URL"]
+    Health -->|no, e.g. bad image tag| Degraded["Degraded -\nprevious pods keep serving,\nrollout does not complete\n(no rollback wired for this\ntarget yet - known gap)"]
+    Healthy --> Smoke["Automated smoke check:\ncurl /health via CloudFront\n(retries up to ~6min for\nArgoCD's polling interval)"]
+    Smoke --> Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
         </pre>
       </div>
     </div>

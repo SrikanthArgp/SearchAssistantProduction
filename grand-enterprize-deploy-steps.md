@@ -24,7 +24,7 @@ flowchart TD
         ALB["Application Load Balancer\nHTTP:80 listener"]
         TG["Target Group\ntarget_type=ip, health check /health"]
         subgraph Service["ECS Service (Fargate, desired count 1)"]
-            Task["Fargate Task\ncontainer port 8000\nnon-adapter image"]
+            Task["Fargate Task\ncontainer port 8000\nsame image as Phase 15\n(adapter layer present but inert)"]
         end
     end
 
@@ -52,7 +52,7 @@ flowchart TD
 
     Browser -->|HTTPS| CF
     CF -->|"default behavior\nvia OAC"| S3
-    CF -->|"/v1/* — HTTP-only origin\n(no ACM cert)"| ALB
+    CF -->|"/v1/* and /health\nHTTP-only origin (no ACM cert)"| ALB
     ALB -.->|protected by| ALBSG
     ALB --> TG
     TG --> Task

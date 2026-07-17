@@ -10,20 +10,20 @@ Status: planning only, nothing built yet. **Hard prerequisites: Phase 16 (ECS Fa
 
 ```mermaid
 flowchart LR
-    Manual["workflow_dispatch\n(manual run — cd.yml, dev phase)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
-    Dispatcher -->|"target: fargate or both"| Trigger["cd-ecs.yml invoked\n(workflow_call, sha input)"]
+    Manual["workflow_dispatch\n(manual run — cd.yml dispatcher)"] --> Dispatcher["cd.yml dispatcher\nresolves target + sha"]
+    Dispatcher -->|"target: fargate, both, or all"| Trigger["cd-ecs.yml invoked\n(workflow_call, sha input)"]
     Trigger --> OIDC["Assume cd-ecs-deploy-role via\nGitHub OIDC\n(own role, own ECS perms —\nindependent of Phase 18's role)"]
-    OIDC --> Build["docker build\n(non-adapter image,\nplain uvicorn CMD)\nchecked out at inputs.sha"]
+    OIDC --> Build["docker build\n(same image as Phase 18,\nadapter layer inert)\nchecked out at inputs.sha"]
     Build --> Push["Push to ECR\ntag: ecs-sha"]
-    Push --> Register["Register new ECS task\ndefinition revision\nimage = repo:sha"]
-    Register --> PathCheck{"Diff touches\ninfra/** ?"}
-    PathCheck -->|no| FastPath["aws ecs update-service\n--task-definition new-rev\n--force-new-deployment"]
-    PathCheck -->|yes| SlowPath["terraform apply\n(infra/ Terraform root)"]
+    Push --> PathCheck{"Diff touches\ninfra/fargate/** ?"}
+    PathCheck -->|no| FastPath["Register new ECS task def revision\n+ aws ecs update-service\n--force-new-deployment"]
+    PathCheck -->|yes| SlowPath["terraform apply\n(infra/fargate/)"]
     FastPath --> WaitStable["aws ecs wait\nservices-stable"]
     SlowPath --> WaitStable
-    WaitStable -->|stable| Smoke["Smoke check:\nGET /health via CloudFront URL"]
     WaitStable -->|deployment circuit\nbreaker trips| AutoRollback["ECS auto-rolls back to\nprevious task definition revision"]
-    Smoke -->|pass| Done["Deploy complete"]
+    WaitStable -->|stable| Smoke["Smoke check:\nGET /health via CloudFront URL"]
+    Smoke -->|pass| Frontend["Build + sync frontend to S3,\ninvalidate CloudFront cache"]
+    Frontend --> Done["Deploy complete"]
 ```
 
 ---
