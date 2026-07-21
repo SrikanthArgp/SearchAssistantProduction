@@ -1,0 +1,20 @@
+{
+  "_comment": "Illustrative snippet — merge the \"hooks\" key into your real .claude/settings.json (project or user level), don't overwrite it. Paths are relative to the repo root this settings.json lives in; adjust if wiring these into a different project.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash loopeng/hooks/msys-pathconv-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash loopeng/hooks/destructive-command-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

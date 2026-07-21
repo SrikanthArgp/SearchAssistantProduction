@@ -1,0 +1,19 @@
+{
+  "name": "contracted-loops",
+  "version": "0.1.0",
+  "description": "Loop engineering as contracts: loopspec format (goal/invariant/iterate/verify/evidence/stop/budget/escalation), lifecycle skills (loop-start/check/close, gap-capture), audit subagents (stop-condition-auditor, parity-checker, loop-warden), and enforcement hooks - distilled from a real 21-phase LangGraph-to-EKS project's incident history.",
+  "author": "SrikanthArgp",
+  "skills": [
+    "skills/loop-start",
+    "skills/loop-check",
+    "skills/loop-close",
+    "skills/gap-capture"
+  ],
+  "agents": [
+    "agents/stop-condition-auditor.md",
+    "agents/parity-checker.md",
+    "agents/loop-warden.md"
+  ],
+  "hooks": "hooks/settings.fragment.json",
+  "_note": "Manifest shape is illustrative against this Claude Code install (2026-07-19); verify field names via `claude plugin --help` before publishing. See PACKAGING.md for the generic/project-specific split - two of the four hooks are project-specific and should be dropped or adapted when porting."
+}

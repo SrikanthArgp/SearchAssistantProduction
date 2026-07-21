@@ -1,0 +1,19 @@
+{
+  "name": "loop-engineering-toolkit",
+  "version": "0.1.0",
+  "description": "Skills, subagents, and hooks implementing a loop-engineering discipline (bounded phases, falsifiable stop conditions, dual-target infra verification, gap logging) derived from this project's real 21-phase build/deploy history.",
+  "author": "SrikanthArgp",
+  "skills": [
+    "skills/phase-scaffold",
+    "skills/phase-close",
+    "skills/gap-log",
+    "skills/cloudfront-refresh"
+  ],
+  "agents": [
+    "agents/phase-verifier.md",
+    "agents/infra-gap-hunter.md",
+    "agents/destructive-action-guard.md"
+  ],
+  "hooks": "hooks/settings.snippet.json",
+  "_note": "This manifest's field names/shape are illustrative, based on this Claude Code installation's plugin schema as of 2026-07-19 (see plugin-manifest-design.md). Confirm against `claude plugin --help` or current docs before publishing/installing on a different version."
+}

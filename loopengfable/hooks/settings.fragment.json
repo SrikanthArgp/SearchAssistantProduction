@@ -1,0 +1,22 @@
+{
+  "_comment": "Merge the 'hooks' key into .claude/settings.json (project level) - do not overwrite existing hooks. Commands assume the repo root as cwd; adjust paths when porting. pretooluse-cloudfront-staleness and stop-state-persistence-nudge are warn-only (always exit 0); the other two block with exit 2.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash loopengfable/hooks/pretooluse-msys-guard.sh" },
+          { "type": "command", "command": "bash loopengfable/hooks/pretooluse-destructive-gate.sh" },
+          { "type": "command", "command": "bash loopengfable/hooks/pretooluse-cloudfront-staleness.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash loopengfable/hooks/stop-state-persistence-nudge.sh" }
+        ]
+      }
+    ]
+  }
+}

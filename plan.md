@@ -1085,9 +1085,26 @@ Same shape as Phase 18, targeting Phase 16's non-adapter image and task definiti
 
 - **Password-reset flow.** Register/login/refresh/logout exist; "forgot password" doesn't. Needs a transactional email piece (e.g., Resend/SendGrid free tier) to deliver the reset link — this is why it's grouped here rather than done alongside the rest of Phase 7's auth work.
 - **XSS via LLM-rendered markdown in the chat UI (Phase 8).** The CRAG pipeline pulls in web search results — untrusted content — that flows into the generated answer, which the chat UI renders. Needs the markdown renderer configured to strip/never execute raw HTML (e.g. `react-markdown` without `rehype-raw`) before this is safe to expose beyond local dev.
-- **Security response headers** (CSP, `X-Content-Type-Options`, `X-Frame-Options`, HSTS) — absent from both the API and the Next.js app.
-- **Secrets management beyond SSM Parameter Store.** Phases 15–16 add SSM `SecureString` parameters for deployed secrets (free, sufficient for a learning-scale deployment), but real secret **rotation**, fine-grained per-secret IAM policies, and audit-logged access — the things an actual enterprise secrets manager (Secrets Manager, Vault) adds over plain SSM — are still not in scope.
 - **High availability.** Phase 16's ECS service runs at desired count 1 (called out there as a deliberate cost/availability tradeoff, not an oversight) — no multi-AZ redundancy, no auto-recovery beyond ECS restarting a crashed task, no multi-region. Phase 15's Lambda path is HA by nature of the platform, but Upstash/Supabase free tiers underneath it are still single-region.
+- **Backend/API security hardening**, consolidated here 2026-07-20 (previously three separate bullets — merged since all three extend the same "backend origin is reachable and trusts too little/too much at the edge" gap):
+  - **Response security headers** (CSP, `X-Content-Type-Options`, `X-Frame-Options`, HSTS) — absent from both the API and the Next.js app.
+  - **Secrets management beyond SSM Parameter Store.** Phases 15–16 add SSM `SecureString` parameters for deployed secrets (free, sufficient for a learning-scale deployment), but real secret **rotation**, fine-grained per-secret IAM policies, and audit-logged access — the things an actual enterprise secrets manager (Secrets Manager, Vault) adds over plain SSM — are still not in scope.
+  - **Origin access hardening (CloudFront → backend origin).** All three deployed origins (API Gateway/Lambda, ALB/Fargate, ALB/EKS) are currently reachable directly, not just via CloudFront — the `X-Auth-Token` custom-header check (added for the Phase 15/18 Stage C CloudFront-OAC-vs-app-JWT-auth conflict) authenticates at the app layer only, it doesn't block direct network access to the origin. Candidate solutions, not yet implemented for any target:
+
+    | Solution | How it works | Applies to | Complexity | AWS cost | Security level |
+    |---|---|---|---|---|---|
+    | Custom header + secret (already in place for Lambda) | CloudFront injects a secret header; backend middleware rejects requests missing/mismatching it | API Gateway, ALB (Fargate/EKS) | Low | Free | Medium — origin still publicly reachable, secret can leak/be replayed |
+    | SG restricted to CloudFront's managed prefix list (`com.amazonaws.global.cloudfront.origin-facing`) | ALB SG only allows inbound from AWS's published CloudFront IP range | ALB (Fargate, EKS) | Low | Free | Medium — blocks direct-IP scanning, doesn't stop someone fronting *their own* CloudFront distribution at the ALB |
+    | Custom header + SG restriction (combo) | Network-level block plus app-level secret check | ALB (Fargate, EKS) | Low–Medium | Free | High — standard "good enough" pattern |
+    | AWS WAF on CloudFront enforcing the header | WebACL attached to the distribution; also gets rate limiting/OWASP rules | Any (CloudFront-side) | Medium | ~$5/mo base + $1/rule + $0.60/1M requests | High |
+    | CloudFront OAC for Lambda Function URLs | Native SigV4 signing between CloudFront and a Lambda Function URL, no shared secret | Lambda (Function URL only, not API Gateway) | Medium (requires dropping API Gateway) | Free | High |
+    | CloudFront VPC Origins | CloudFront reaches a *private* ALB/EC2/NLB inside the VPC; origin never gets a public IP | ALB (Fargate, EKS) | Medium — internal-only ALB re-architecture | ~Same as current (internal ALB, no public exposure) | Very High |
+    | Private API Gateway + VPC endpoint + CloudFront VPC Origin | API Gateway `PRIVATE` endpoint type behind an interface VPC endpoint | API Gateway | High | VPC endpoint ~$7.5/mo/AZ + data processing | Very High |
+    | mTLS between CloudFront and origin | Origin only accepts connections presenting a client cert CloudFront was issued | ALB, API Gateway | High | ACM Private CA ~$400/mo or self-managed CA (ops overhead) | Very High, usually overkill outside compliance requirements |
+
+    Leaning recommendation when this gets picked up: SG-restrict-to-CloudFront-prefix-list + custom header for the Fargate/EKS ALBs (cheap, low effort); CloudFront VPC Origins as the stronger follow-up if a hard network guarantee is wanted instead of "best effort."
+
+  Not scheduled — revisit alongside the other deferred items above.
 
 Also flagged as optional/likely-skip even in a later pass, not just deferred: frontend error tracking (Sentry), account/session-device management UI, load testing, a dedicated staging environment, and a custom domain + ACM certificate for Phases 15–16 (currently using CloudFront's default domain to stay in the free tier).
 

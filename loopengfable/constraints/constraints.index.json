@@ -1,0 +1,13 @@
+{
+  "_comment": "Machine-readable index of constraints.md — stable IDs for hooks/subagents to reference. 'class' is the enforcement class; 'enforcer' is the artifact that owns it.",
+  "constraints": [
+    { "id": "C1", "slug": "msys-pathconv-required", "class": "HOOK", "enforcer": "hooks/pretooluse-msys-guard.sh", "incidents": 3 },
+    { "id": "C2", "slug": "no-hand-run-pipeline-steps", "class": "AGENT", "enforcer": "subagents/parity-checker.md", "incidents": 1 },
+    { "id": "C3", "slug": "dual-target-record-wins", "class": "AGENT", "enforcer": "subagents/parity-checker.md", "incidents": 15 },
+    { "id": "C4", "slug": "cloudfront-domain-refetch", "class": "HOOK_WARN", "enforcer": "hooks/pretooluse-cloudfront-staleness.sh", "incidents": 1 },
+    { "id": "C5", "slug": "destructive-confirmation-gate", "class": "HOOK", "enforcer": "hooks/pretooluse-destructive-gate.sh", "incidents": 0 },
+    { "id": "C6", "slug": "terraform-workspace-confirm", "class": "AGENT", "enforcer": "subagents/parity-checker.md", "incidents": 2 },
+    { "id": "C7", "slug": "clear-checkout-extraheader", "class": "DOC", "enforcer": ".github/workflows/cd-eks.yml (in-workflow fix)", "incidents": 1 },
+    { "id": "C8", "slug": "enforcement-decision-at-close", "class": "AGENT", "enforcer": "subagents/loop-warden.md", "incidents": 2 }
+  ]
+}
